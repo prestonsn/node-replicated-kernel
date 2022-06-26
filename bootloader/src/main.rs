@@ -308,7 +308,7 @@ fn assert_required_cpu_features() {
 
     assert!(has_sse3);
     assert!(has_osfxsr);
-    assert!(has_smap);
+    // assert!(has_smap);
     assert!(has_smep);
     assert!(has_xsave);
     assert!(has_fsgsbase);
