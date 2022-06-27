@@ -319,7 +319,7 @@ fn assert_required_cpu_features() {
     assert!(has_pae);
     assert!(has_pse);
     assert!(has_msr);
-    assert!(has_1gib_pages);
+    // assert!(has_1gib_pages);
     assert!(has_rdtscp);
     assert!(has_syscall_sysret);
     assert!(has_execute_disable);
