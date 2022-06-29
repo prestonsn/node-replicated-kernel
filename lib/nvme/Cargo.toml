@@ -1,8 +1,16 @@
 [package]
 name = "nvme"
 version = "0.1.0"
+authors = ['Preston Narchetti <prestonnarchetti@gmail.com']
+description = "nvme - a prototype node-replicated nvme driver."
 edition = "2021"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+log = "0.4"
+kpi = { path = "../kpi" }
+static_assertions = "1.1.0"
+x86 = "0.48"
+arrayvec = { version = "0.7.0", default-features = false }
+custom_error = { version = "1.9", default-features = false, features = ["unstable"] }
+driverkit = "0.17"

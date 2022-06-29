@@ -417,6 +417,9 @@ fn _start(argc: isize, _argv: *const *const u8) -> isize {
         let _ = spin::lazy::Lazy::force(&rackscale::RPC_CLIENT);
     }
 
+    // nvme.
+    crate::transport::nvme::init();
+
     // Bring up the rest of the system (needs topology, APIC, and global memory)
     coreboot::boot_app_cores(log.clone(), bsp_replica, fs_logs, fs_replica);
 

@@ -23,7 +23,7 @@ lazy_static! {
         let mut devices = ArrayVec::new();
         let bus_iter = scan_bus();
         for device in bus_iter {
-            info!("PCI: {}", device);
+            info!("PCI: {}, vendor: {}, deviceID: {}", device, device.vendor_id(), device.device_id());
             devices.push(Mutex::new(Some(device)));
         }
 

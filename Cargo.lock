@@ -1368,6 +1368,7 @@ dependencies = [
  "memfile",
  "memoffset",
  "node-replication",
+ "nvme",
  "once_cell",
  "proptest 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "rand 0.8.4",
@@ -1445,6 +1446,19 @@ checksum = "05499f3756671c15885fee9034446956fff3f243d6077b91e5767df161f766b3"
 dependencies = [
  "hermit-abi",
  "libc 0.2.124",
+]
+
+[[package]]
+name = "nvme"
+version = "0.1.0"
+dependencies = [
+ "arrayvec",
+ "custom_error",
+ "driverkit",
+ "kpi",
+ "log",
+ "static_assertions",
+ "x86 0.48.0",
 ]
 
 [[package]]

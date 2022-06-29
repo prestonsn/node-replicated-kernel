@@ -5,3 +5,5 @@
 pub mod ethernet;
 #[cfg(feature = "shmem")]
 pub mod shmem;
+
+pub mod nvme;
