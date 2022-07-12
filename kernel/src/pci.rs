@@ -3,6 +3,7 @@
 
 #![allow(unused)]
 
+use alloc::vec::Vec;
 use arrayvec::ArrayVec;
 use driverkit::pci::{scan_bus, PciDevice};
 use lazy_static::lazy_static;
@@ -42,6 +43,21 @@ pub(crate) fn claim_device(vendor_id: u16, device_id: u16) -> Option<PciDevice> 
         }
     }
     None
+}
+
+/// Takes all devices (for use in a driver) that match specified baseclass_code and subclass_code.
+pub(crate) fn claim_devices_by_class_codes(baseclass_code: u8, subclass_code: u8) -> Vec<Option<PciDevice>> {
+    let mut claimed_devices = Vec::new();
+    for device in PCI_DEVICES.iter() {
+        let device = &mut *device.lock();
+        if let Some(locked_device) = device {
+            let (_, bc_code, sc_code, _) = locked_device.revision_and_class();
+            if bc_code == baseclass_code && sc_code == subclass_code {
+                claimed_devices.push(device.take());
+            }
+        }
+    }
+    claimed_devices
 }
 
 pub(crate) fn init() {

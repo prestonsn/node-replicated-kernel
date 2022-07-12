@@ -133,6 +133,16 @@ parser.add_argument('--qemu-shmem-path',
                     help="Provide shared memory file path.",
                     required=False,
                     default="")
+parser.add_argument('--enable_nvme',
+                    help="Attach nvme device.",
+                    required=False,
+                    action="store_true",
+                    default=False)
+parser.add_argument('--nvme_img_path',
+					type=str,
+                    help="Path to .img file for nvme device.",
+                    required=False,
+                    default="nvm.img")
 
 # Baremetal argument
 parser.add_argument('--configure-ipxe', action="store_true", default=False,
@@ -475,6 +485,10 @@ def run_qemu(args):
     if args.qemu_monitor:
         qemu_default_args += ['-monitor',
                               'telnet:127.0.0.1:55555,server,nowait']
+    if args.enable_nvme:
+        qemu_default_args += ['-drive', 'file={},if=none,id=nvm'.format(args.nvme_img_path),
+                              '-device', 'nvme,serial=deadbeef,drive=nvm']
+
 
     # Name threads on host for `qemu_affinity.py` to find it
     qemu_default_args += ['-name', 'nrk,debug-threads=on']
