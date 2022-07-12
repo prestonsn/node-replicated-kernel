@@ -17,11 +17,14 @@ members = [
     "lib/nvme",
     "usr/init",
     "usr/rkapps",
+    #"lib/libfringe",
+    #"lib/acpica-sys"
+    #"lib/rust-topology",
     #"lib/rust-driverkit",
     #"lib/rust-x86",
-    #"lib/rawtime",
-    #"lib/libfringe",
-    #"lib/rust-topology"
+    #"lib/rawtime",    
+    #"lib/rust-klogger",
+    #"lib/rexpect",
 ]
 
 # disable stack unwinding on panic for now
@@ -38,3 +41,6 @@ debug = true
 #x86 = { path = "lib/rust-x86" }
 #rawtime = { path = "lib/rawtime" }
 #atopology = { path = "lib/rust-topology" }
+#klogger = { path = "lib/rust-klogger" }
+#libacpica = { path = "lib/acpica-sys" }
+#rexpect = { path = "lib/rexpect" }
