@@ -118,11 +118,24 @@ pub struct PhysicalMemory;
 
 impl PhysicalMemory {
     pub fn allocate_base_page() -> Result<(FrameId, PAddr), SystemCallError> {
+        PhysicalMemory::allocate_frame(true)
+    }
+
+    pub fn allocate_large_page() -> Result<(FrameId, PAddr), SystemCallError> {
+        PhysicalMemory::allocate_frame(false)
+    }
+
+    fn allocate_frame(is_base: bool) -> Result<(FrameId, PAddr), SystemCallError> {
+        let page_size = if is_base {
+            x86::current::paging::BASE_PAGE_SIZE
+        } else {
+            x86::current::paging::LARGE_PAGE_SIZE
+        };
         unsafe {
             let (err, frame_id, paddr) = syscall!(
                 SystemCall::Process as u64,
                 ProcessOperation::AllocatePhysical as u64,
-                x86::current::paging::BASE_PAGE_SIZE,
+                page_size,
                 3
             );
 
@@ -135,15 +148,24 @@ impl PhysicalMemory {
         }
     }
 
-    pub fn allocate_large_page() -> Result<(FrameId, PAddr), SystemCallError> {
-        unimplemented!()
+    pub fn release_frame(id: FrameId) -> Result<(), SystemCallError> {
+        PhysicalMemory::release_page(id)
     }
 
-    pub fn release_base_page(_id: FrameId) -> Result<(), SystemCallError> {
-        unimplemented!()
-    }
+    fn release_page(id: FrameId) -> Result<(), SystemCallError> {
+        unsafe {
+            let (err, _, _) = syscall!(
+                SystemCall::Process as u64,
+                ProcessOperation::ReleasePhysical as u64,
+                id,
+                3
+            );
 
-    pub fn release_large_page(_id: FrameId) -> Result<(), SystemCallError> {
-        unimplemented!()
+            if err == 0 {
+                Ok(())
+            } else {
+                Err(SystemCallError::from(err))
+            }
+        }
     }
 }

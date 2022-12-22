@@ -12,7 +12,9 @@ use rpc::RPCClient;
 use crate::fs::cnrfs;
 use crate::fs::fd::FileDescriptor;
 
-use super::fio::*;
+use super::super::kernelrpc::*;
+use super::FileIO;
+use crate::arch::rackscale::controller::get_local_pid;
 
 #[derive(Debug)]
 pub(crate) struct CloseReq {
@@ -31,20 +33,20 @@ pub(crate) fn rpc_close(
     unsafe { encode(&req, &mut (&mut req_data).as_mut()) }.unwrap();
 
     // Setup result
-    let mut res_data = [0u8; core::mem::size_of::<FIORes>()];
+    let mut res_data = [0u8; core::mem::size_of::<KernelRpcRes>()];
 
     // Call Close() RPC
     rpc_client
         .call(
             pid,
-            FileIO::Close as RPCType,
+            KernelRpc::Close as RPCType,
             &[&req_data],
             &mut [&mut res_data],
         )
         .unwrap();
 
     // Decode and return result
-    if let Some((res, remaining)) = unsafe { decode::<FIORes>(&mut res_data) } {
+    if let Some((res, remaining)) = unsafe { decode::<KernelRpcRes>(&mut res_data) } {
         // Check for extra data
         if remaining.len() > 0 {
             return Err(RPCError::ExtraData);
@@ -62,8 +64,8 @@ pub(crate) fn rpc_close(
 // RPC Handler function for close() RPCs in the controller
 pub(crate) fn handle_close(hdr: &mut RPCHeader, payload: &mut [u8]) -> Result<(), RPCError> {
     // Lookup local pid
-    let local_pid = { get_local_pid(hdr.pid) };
-    if local_pid.is_none() {
+    let local_pid = { get_local_pid(hdr.client_id, hdr.pid) };
+    if local_pid.is_err() {
         return construct_error_ret(hdr, payload, RPCError::NoFileDescForPid);
     }
     let local_pid = local_pid.unwrap();
@@ -73,7 +75,7 @@ pub(crate) fn handle_close(hdr: &mut RPCHeader, payload: &mut [u8]) -> Result<()
         debug!("Close(fd={:?}), local_pid={:?}", req.fd, local_pid);
 
         // Call close (unmap_fd) and return result
-        let res = FIORes {
+        let res = KernelRpcRes {
             ret: convert_return(cnrfs::MlnrKernelNode::unmap_fd(local_pid, req.fd)),
         };
         construct_ret(hdr, payload, res)

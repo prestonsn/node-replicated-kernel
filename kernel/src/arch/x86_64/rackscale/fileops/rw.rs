@@ -12,7 +12,9 @@ use rpc::RPCClient;
 use crate::fs::cnrfs;
 use crate::fs::fd::FileDescriptor;
 
-use super::fio::*;
+use super::super::kernelrpc::*;
+use super::FileIO;
+use crate::arch::rackscale::controller::get_local_pid;
 
 #[derive(Debug)]
 pub(crate) struct RWReq {
@@ -50,14 +52,14 @@ pub(crate) fn rpc_writeat(
     unsafe { encode(&req, &mut (&mut req_data).as_mut()) }.unwrap();
 
     // Create result buffer
-    let mut res_data = [0u8; core::mem::size_of::<FIORes>()];
+    let mut res_data = [0u8; core::mem::size_of::<KernelRpcRes>()];
 
     // Call readat() or read() RPCs
     if offset == -1 {
         rpc_client
             .call(
                 pid,
-                FileIO::Write as RPCType,
+                KernelRpc::Write as RPCType,
                 &[&req_data, &data],
                 &mut [&mut res_data],
             )
@@ -66,7 +68,7 @@ pub(crate) fn rpc_writeat(
         rpc_client
             .call(
                 pid,
-                FileIO::WriteAt as RPCType,
+                KernelRpc::WriteAt as RPCType,
                 &[&req_data, &data],
                 &mut [&mut res_data],
             )
@@ -74,7 +76,7 @@ pub(crate) fn rpc_writeat(
     }
 
     // Decode result, return result if decoded successfully
-    if let Some((res, remaining)) = unsafe { decode::<FIORes>(&mut res_data) } {
+    if let Some((res, remaining)) = unsafe { decode::<KernelRpcRes>(&mut res_data) } {
         if remaining.len() > 0 {
             return Err(RPCError::ExtraData);
         }
@@ -114,14 +116,14 @@ pub(crate) fn rpc_readat(
     unsafe { encode(&req, &mut (&mut req_data).as_mut()) }.unwrap();
 
     // Create result buffer
-    let mut res_data = [0u8; core::mem::size_of::<FIORes>()];
+    let mut res_data = [0u8; core::mem::size_of::<KernelRpcRes>()];
 
     // Call Read() or ReadAt() RPC
     if offset == -1 {
         rpc_client
             .call(
                 pid,
-                FileIO::Read as RPCType,
+                KernelRpc::Read as RPCType,
                 &[&req_data],
                 &mut [&mut res_data, buff_ptr],
             )
@@ -130,7 +132,7 @@ pub(crate) fn rpc_readat(
         rpc_client
             .call(
                 pid,
-                FileIO::ReadAt as RPCType,
+                KernelRpc::ReadAt as RPCType,
                 &[&req_data],
                 &mut [&mut res_data, buff_ptr],
             )
@@ -138,7 +140,7 @@ pub(crate) fn rpc_readat(
     }
 
     // Decode result, if successful, return result
-    if let Some((res, remaining)) = unsafe { decode::<FIORes>(&mut res_data) } {
+    if let Some((res, remaining)) = unsafe { decode::<KernelRpcRes>(&mut res_data) } {
         if remaining.len() > 0 {
             return Err(RPCError::ExtraData);
         }
@@ -152,8 +154,8 @@ pub(crate) fn rpc_readat(
 // RPC Handler function for read() RPCs in the controller
 pub(crate) fn handle_read(hdr: &mut RPCHeader, payload: &mut [u8]) -> Result<(), RPCError> {
     // Lookup local pid
-    let local_pid = { get_local_pid(hdr.pid) };
-    if local_pid.is_none() {
+    let local_pid = { get_local_pid(hdr.client_id, hdr.pid) };
+    if local_pid.is_err() {
         return construct_error_ret(hdr, payload, RPCError::NoFileDescForPid);
     }
     let local_pid = local_pid.unwrap();
@@ -170,7 +172,7 @@ pub(crate) fn handle_read(hdr: &mut RPCHeader, payload: &mut [u8]) -> Result<(),
         );
         fd = req.fd;
         len = req.len;
-        if hdr.msg_type == FileIO::ReadAt as RPCType {
+        if hdr.msg_type == KernelRpc::ReadAt as RPCType {
             offset = req.offset;
             operation = FileOperation::ReadAt;
         }
@@ -180,7 +182,7 @@ pub(crate) fn handle_read(hdr: &mut RPCHeader, payload: &mut [u8]) -> Result<(),
     }
 
     // Read directly into payload buffer, at offset after result field & header
-    let start = FIORES_SIZE as usize;
+    let start = KernelRpcRes_SIZE as usize;
     let end = start + len as usize;
     let ret =
         cnrfs::MlnrKernelNode::file_read(local_pid, fd, &mut &mut payload[start..end], offset);
@@ -192,7 +194,7 @@ pub(crate) fn handle_read(hdr: &mut RPCHeader, payload: &mut [u8]) -> Result<(),
     }
 
     // Construct return
-    let res = FIORes {
+    let res = KernelRpcRes {
         ret: convert_return(ret),
     };
     construct_ret_extra_data(hdr, payload, res, additional_data as u64)
@@ -201,8 +203,8 @@ pub(crate) fn handle_read(hdr: &mut RPCHeader, payload: &mut [u8]) -> Result<(),
 // RPC Handler function for write() RPCs in the controller
 pub(crate) fn handle_write(hdr: &mut RPCHeader, payload: &mut [u8]) -> Result<(), RPCError> {
     // Lookup local pid
-    let local_pid = { get_local_pid(hdr.pid) };
-    if local_pid.is_none() {
+    let local_pid = { get_local_pid(hdr.client_id, hdr.pid) };
+    if local_pid.is_err() {
         return construct_error_ret(hdr, payload, RPCError::NoFileDescForPid);
     }
     let local_pid = local_pid.unwrap();
@@ -215,7 +217,7 @@ pub(crate) fn handle_write(hdr: &mut RPCHeader, payload: &mut [u8]) -> Result<()
         );
 
         // Call Write() or WriteAt()
-        let offset = if hdr.msg_type == FileIO::Write as RPCType {
+        let offset = if hdr.msg_type == KernelRpc::Write as RPCType {
             -1
         } else {
             req.offset
@@ -225,7 +227,7 @@ pub(crate) fn handle_write(hdr: &mut RPCHeader, payload: &mut [u8]) -> Result<()
         let ret = cnrfs::MlnrKernelNode::file_write(local_pid, req.fd, data, offset);
 
         // Construct return
-        let res = FIORes {
+        let res = KernelRpcRes {
             ret: convert_return(ret),
         };
         construct_ret(hdr, payload, res)

@@ -16,8 +16,8 @@ vibrio = { path = "../../lib/vibrio" }
 kpi = { path = "../../lib/kpi" }
 arrayvec = { version = "0.7.0", default-features = false }
 proptest = { git = "https://github.com/gz/proptest.git", branch = "x86-asm", default-features = false, features = ['alloc', 'hardware-rng'] }
-rawtime = "0.0.8"
-x86 = "0.50"
+rawtime = "0.0.10"
+x86 = { version = "0.52", features = ["unstable"] }
 log = "0.4"
 #libm = "0.2.2"
 num-traits = { version = "0.2", default-features = false, features = ["libm"] }
@@ -46,6 +46,8 @@ test-rump-net = [ "rumprt" ]
 test-fs = []
 test-fs-prop = []
 test-pmem-alloc = []
+test-phys-alloc = []
+test-request-core-remote = []
 
 # Simple micro-benchmarks
 bench-vmops = []
@@ -72,6 +74,8 @@ all-tests = [
     "test-rump-tmpfs",
     "test-rump-net",
     "test-fs",
+    "test-phys-alloc",
+    # "test-request-core-remote", TODO: used only for rackscale tests right now
     #"test-fs-prop", # needs userspace
     #"test-pmem-alloc", # needs SMP
 ]

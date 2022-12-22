@@ -2,11 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 use alloc::collections::BTreeMap;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
-
 use fallible_collections::FallibleVecGlobal;
+use lazy_static::lazy_static;
 use smoltcp::iface::{Interface, InterfaceBuilder, NeighborCache, Routes};
 use smoltcp::wire::{EthernetAddress, IpAddress, IpCidr, Ipv4Address};
+use spin::Mutex;
 use vmxnet3::pci::BarAccess;
 use vmxnet3::smoltcp::DevQueuePhy;
 use vmxnet3::vmx::VMXNet3;
@@ -18,8 +20,13 @@ use crate::memory::PAddr;
 use crate::pci::claim_device;
 use kpi::KERNEL_BASE;
 
+lazy_static! {
+    pub(crate) static ref ETHERNET_IFACE: Arc<Mutex<Interface<'static, DevQueuePhy>>> =
+        init_network().expect("Failed to create ethernet interface");
+}
+
 #[allow(unused)]
-pub(crate) fn init_network<'a>() -> KResult<Interface<'a, DevQueuePhy>> {
+pub(crate) fn init_network<'a>() -> KResult<Arc<Mutex<Interface<'a, DevQueuePhy>>>> {
     const VMWARE_INC: u16 = 0x15ad;
     const VMXNET_DEV: u16 = 0x07b0;
     if let Some(vmxnet3_dev) = claim_device(VMWARE_INC, VMXNET_DEV) {
@@ -35,7 +42,7 @@ pub(crate) fn init_network<'a>() -> KResult<Interface<'a, DevQueuePhy>> {
                         PAddr::from(KERNEL_BASE),
                         PAddr::from(bar),
                         0x1000,
-                        MapAction::ReadWriteKernel,
+                        MapAction::kernel() | MapAction::write(),
                     )
                     .expect("Failed to write potential vmxnet3 bar addresses")
             }
@@ -49,18 +56,19 @@ pub(crate) fn init_network<'a>() -> KResult<Interface<'a, DevQueuePhy>> {
         // Create the EthernetInterface wrapping the VMX device
         let device = DevQueuePhy::new(vmx).expect("Can't create PHY");
         let neighbor_cache = NeighborCache::new(BTreeMap::new());
+        let machine_id = crate::CMDLINE.get().map_or(0, |c| c.machine_id);
 
         let (ethernet_addr, ip_addrs) = match crate::CMDLINE.get().map_or(Mode::Native, |c| c.mode)
         {
             Mode::Client => (
-                EthernetAddress([0x56, 0xb4, 0x44, 0xe9, 0x62, 0xdd]),
-                [IpCidr::new(IpAddress::v4(172, 31, 0, 12), 24)],
+                EthernetAddress([0x56, 0xb4, 0x44, 0xe9, 0x62, 0xd0 + machine_id as u8]),
+                [IpCidr::new(IpAddress::v4(172, 31, 0, 11 + machine_id), 24)],
             ),
             _ => {
                 // TODO: MAC, IP, and default route should be dynamic
                 (
-                    EthernetAddress([0x56, 0xb4, 0x44, 0xe9, 0x62, 0xdc]),
-                    [IpCidr::new(IpAddress::v4(172, 31, 0, 11), 24)],
+                    EthernetAddress([0x56, 0xb4, 0x44, 0xe9, 0x62, 0xd0 + machine_id as u8]),
+                    [IpCidr::new(IpAddress::v4(172, 31, 0, 11 + machine_id), 24)],
                 )
             }
         };
@@ -78,7 +86,7 @@ pub(crate) fn init_network<'a>() -> KResult<Interface<'a, DevQueuePhy>> {
             .routes(routes)
             .neighbor_cache(neighbor_cache)
             .finalize();
-        Ok(iface)
+        Ok(Arc::new(Mutex::new(iface)))
     } else {
         Err(KError::VMXNet3DeviceNotFound)
     }
@@ -89,15 +97,19 @@ pub(crate) fn init_network<'a>() -> KResult<Interface<'a, DevQueuePhy>> {
 pub(crate) fn init_ethernet_rpc(
     server_ip: smoltcp::wire::IpAddress,
     server_port: u16,
+    send_client_data: bool, // This field is used to indicate if init_client() should send ClientRegistrationRequest
 ) -> KResult<alloc::boxed::Box<rpc::client::Client>> {
+    use crate::arch::rackscale::registration::initialize_client;
     use alloc::boxed::Box;
     use rpc::client::Client;
     use rpc::transport::TCPTransport;
     use rpc::RPCClient;
 
-    let iface = init_network()?;
-    let rpc_transport = Box::try_new(TCPTransport::new(Some(server_ip), server_port, iface))?;
+    let rpc_transport = Box::try_new(TCPTransport::new(
+        Some(server_ip),
+        server_port,
+        Arc::clone(&ETHERNET_IFACE),
+    ))?;
     let mut client = Box::try_new(Client::new(rpc_transport))?;
-    client.connect()?;
-    Ok(client)
+    initialize_client(client, send_client_data)
 }

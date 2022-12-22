@@ -14,7 +14,9 @@ use rpc::RPCClient;
 use crate::fallible_string::TryString;
 use crate::fs::cnrfs;
 
-use super::fio::*;
+use super::super::kernelrpc::*;
+use super::FileIO;
+use crate::arch::rackscale::controller::get_local_pid;
 
 #[derive(Debug)]
 pub(crate) struct OpenReq {
@@ -37,7 +39,7 @@ pub(crate) fn rpc_open<P: AsRef<[u8]> + Debug>(
         pathname,
         flags,
         modes,
-        FileIO::Open as RPCType,
+        KernelRpc::Open as RPCType,
     )
 }
 
@@ -57,7 +59,7 @@ fn rpc_open_create<P: AsRef<[u8]> + Debug>(
     unsafe { encode(&req, &mut (&mut req_data).as_mut()) }.unwrap();
 
     // Construct result buffer
-    let mut res_data = [0u8; core::mem::size_of::<FIORes>()];
+    let mut res_data = [0u8; core::mem::size_of::<KernelRpcRes>()];
 
     // Call the RPC
     rpc_client
@@ -70,7 +72,7 @@ fn rpc_open_create<P: AsRef<[u8]> + Debug>(
         .unwrap();
 
     // Decode and return the result
-    if let Some((res, remaining)) = unsafe { decode::<FIORes>(&mut res_data) } {
+    if let Some((res, remaining)) = unsafe { decode::<KernelRpcRes>(&mut res_data) } {
         if remaining.len() > 0 {
             return Err(RPCError::ExtraData);
         }
@@ -84,8 +86,8 @@ fn rpc_open_create<P: AsRef<[u8]> + Debug>(
 // RPC Handler function for open() RPCs in the controller
 pub(crate) fn handle_open(hdr: &mut RPCHeader, payload: &mut [u8]) -> Result<(), RPCError> {
     // Lookup local pid
-    let local_pid = { get_local_pid(hdr.pid) };
-    if local_pid.is_none() {
+    let local_pid = { get_local_pid(hdr.client_id, hdr.pid) };
+    if local_pid.is_err() {
         return construct_error_ret(hdr, payload, RPCError::NoFileDescForPid);
     }
     let local_pid = local_pid.unwrap();
@@ -116,7 +118,7 @@ pub(crate) fn handle_open(hdr: &mut RPCHeader, payload: &mut [u8]) -> Result<(),
     let cnr_ret = cnrfs::MlnrKernelNode::map_fd(local_pid, path_string, flags, modes);
 
     // Create return
-    let res = FIORes {
+    let res = KernelRpcRes {
         ret: convert_return(cnr_ret),
     };
     construct_ret(hdr, payload, res)

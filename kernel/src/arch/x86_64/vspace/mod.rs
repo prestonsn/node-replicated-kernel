@@ -7,6 +7,7 @@ use core::ops::Bound::*;
 use fallible_collections::btree::BTreeMap;
 use lazy_static::lazy_static;
 use spin::Mutex;
+use x86::current::paging::{PDFlags, PDPTFlags, PTFlags};
 
 mod debug;
 pub mod page_table; /* TODO(encapsulation): This should be a private module but we break encapsulation in a few places */
@@ -186,5 +187,191 @@ impl VSpace {
 
     pub(crate) fn pml4_address(&self) -> PAddr {
         self.page_table.pml4_address()
+    }
+}
+
+impl MapAction {
+    /// Transform MapAction into rights for 1 GiB page.
+    pub(crate) fn to_pdpt_rights(self) -> PDPTFlags {
+        let mut flags = PDPTFlags::empty();
+
+        if self.is_readable() {
+            flags |= PDPTFlags::P
+        }
+        if self.is_writable() {
+            flags |= PDPTFlags::RW;
+        }
+        if !self.is_executable() {
+            flags |= PDPTFlags::XD;
+        }
+        if self.is_userspace() {
+            debug_assert!(!self.is_kernelspace());
+            flags |= PDPTFlags::US;
+        }
+        if self.is_aliasable() {
+            flags |= PDPTFlags::USER_11;
+        }
+
+        flags
+    }
+
+    /// Transform MapAction into rights for 2 MiB page.
+    pub(crate) fn to_pd_rights(self) -> PDFlags {
+        let mut flags = PDFlags::empty();
+
+        if self.is_readable() {
+            flags |= PDFlags::P
+        }
+        if self.is_writable() {
+            flags |= PDFlags::RW;
+        }
+        if !self.is_executable() {
+            flags |= PDFlags::XD;
+        }
+        if self.is_userspace() {
+            debug_assert!(!self.is_kernelspace());
+            flags |= PDFlags::US;
+        }
+        if self.is_aliasable() {
+            flags |= PDFlags::USER_11;
+        }
+
+        flags
+    }
+
+    /// Transform MapAction into rights for 4KiB page.
+    pub(crate) fn to_pt_rights(self) -> PTFlags {
+        let mut flags = PTFlags::empty();
+
+        if self.is_readable() {
+            flags |= PTFlags::P
+        }
+        if self.is_writable() {
+            flags |= PTFlags::RW;
+        }
+        if !self.is_executable() {
+            flags |= PTFlags::XD;
+        }
+        if self.is_userspace() {
+            debug_assert!(!self.is_kernelspace());
+            flags |= PTFlags::US;
+        }
+        if self.is_aliasable() {
+            flags |= PTFlags::USER_11;
+        }
+
+        flags
+    }
+}
+
+impl From<PTFlags> for MapAction {
+    fn from(f: PTFlags) -> MapAction {
+        let irrelevant_bits: PTFlags =
+            PTFlags::PWT | PTFlags::A | PTFlags::D | PTFlags::G | PTFlags::PWT;
+
+        let mut cleaned = f;
+        cleaned.remove(irrelevant_bits);
+
+        let mut ma = MapAction::none();
+        if cleaned.contains(PTFlags::US) {
+            ma |= MapAction::user()
+        } else {
+            ma |= MapAction::kernel()
+        }
+
+        if cleaned.contains(PTFlags::P) {
+            ma |= MapAction::user()
+        }
+        if cleaned.contains(PTFlags::RW) {
+            ma |= MapAction::write()
+        }
+        if !cleaned.contains(PTFlags::XD) {
+            ma |= MapAction::execute()
+        }
+        if cleaned.contains(PTFlags::PCD) {
+            ma |= MapAction::no_cache()
+        }
+
+        if cleaned.contains(PTFlags::USER_11) {
+            ma |= MapAction::aliased()
+        }
+
+        ma
+    }
+}
+
+impl From<PDFlags> for MapAction {
+    fn from(f: PDFlags) -> MapAction {
+        let irrelevant_bits =
+            PDFlags::PWT | PDFlags::A | PDFlags::D | PDFlags::PS | PDFlags::G | PDFlags::PAT;
+
+        let mut cleaned = f;
+        cleaned.remove(irrelevant_bits);
+
+        let mut ma = MapAction::none();
+        if cleaned.contains(PDFlags::US) {
+            ma |= MapAction::user()
+        } else {
+            ma |= MapAction::kernel()
+        }
+
+        if cleaned.contains(PDFlags::P) {
+            ma |= MapAction::user()
+        }
+        if cleaned.contains(PDFlags::RW) {
+            ma |= MapAction::write()
+        }
+        if !cleaned.contains(PDFlags::XD) {
+            ma |= MapAction::execute()
+        }
+        if cleaned.contains(PDFlags::PCD) {
+            ma |= MapAction::no_cache()
+        }
+
+        if cleaned.contains(PDFlags::USER_11) {
+            ma |= MapAction::aliased()
+        }
+
+        ma
+    }
+}
+
+impl From<PDPTFlags> for MapAction {
+    fn from(f: PDPTFlags) -> MapAction {
+        let irrelevant_bits: PDPTFlags = PDPTFlags::PWT
+            | PDPTFlags::A
+            | PDPTFlags::D
+            | PDPTFlags::PS
+            | PDPTFlags::G
+            | PDPTFlags::PAT;
+
+        let mut cleaned = f;
+        cleaned.remove(irrelevant_bits);
+
+        let mut ma = MapAction::none();
+        if cleaned.contains(PDPTFlags::US) {
+            ma |= MapAction::user()
+        } else {
+            ma |= MapAction::kernel()
+        }
+
+        if cleaned.contains(PDPTFlags::P) {
+            ma |= MapAction::user()
+        }
+        if cleaned.contains(PDPTFlags::RW) {
+            ma |= MapAction::write()
+        }
+        if !cleaned.contains(PDPTFlags::XD) {
+            ma |= MapAction::execute()
+        }
+        if cleaned.contains(PDPTFlags::PCD) {
+            ma |= MapAction::no_cache()
+        }
+
+        if cleaned.contains(PDPTFlags::USER_11) {
+            ma |= MapAction::aliased()
+        }
+
+        ma
     }
 }

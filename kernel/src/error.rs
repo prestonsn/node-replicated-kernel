@@ -99,6 +99,8 @@ pub enum KError {
     BinaryNotFound { binary: &'static str },
     /// Supplied frame was invalid
     InvalidFrame,
+    /// The frame could not be detached from the process -- still mapped in its VSpace.
+    FrameStillMapped,
     /// Address space operation covers existing mapping {base:?}
     AlreadyMapped { base: VAddr },
     /// Provided virtual base {base:?} is invalid (led to overflow on mappings).
@@ -169,6 +171,10 @@ pub enum KError {
     TryFromIntError,
     /// The provided file-descriptor value was too big (>= MAX_FILES_PER_PROCESS)
     FileDescriptorTooLarge,
+    /// Unable to convert message ID to valid RPC type (faulty message?)
+    InvalidRpcType,
+    /// Unable to perform DCM transaction (faulty message?)
+    DCMError,
 }
 
 impl From<CapacityError<crate::memory::Frame>> for KError {

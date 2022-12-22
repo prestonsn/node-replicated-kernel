@@ -48,6 +48,8 @@ struct TRXQueueShared {
     buffer: *mut u8,
 }
 
+unsafe impl Send for TRXQueueShared {}
+
 impl TRXQueueShared {
     fn new(txqsets: usize, rxqsets: usize) -> Result<TRXQueueShared, VMXNet3Error> {
         // Safety: Needs to allocate slice that can hold txqsets and rxqsets structs
@@ -351,7 +353,7 @@ impl VMXNet3 {
         self.lladdr[5] = (high >> 8) as u8;
 
         // For testing only:
-        // 56:b4:44:e9:62:dc
+        // 56:b4:44:e9:62:d0
         debug_assert_eq!(self.lladdr[0], 0x56);
         debug_assert_eq!(self.lladdr[1], 0xb4);
         debug_assert_eq!(self.lladdr[2], 0x44);

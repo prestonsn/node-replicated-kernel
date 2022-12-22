@@ -1,3 +1,6 @@
+// Copyright © 2022 VMware, Inc. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 use super::{Receiver, Sender};
 use crate::rpc::*;
 use crate::transport::Transport;
@@ -9,10 +12,34 @@ pub struct ShmemTransport<'a> {
     tx: Sender<'a>,
 }
 
+// Allow dead code because these functions are used in unit testing
 #[allow(dead_code)]
 impl<'a> ShmemTransport<'a> {
     pub fn new(rx: Receiver<'a>, tx: Sender<'a>) -> ShmemTransport<'a> {
         ShmemTransport { rx, tx }
+    }
+
+    fn send(&self, buf: &[u8]) -> Result<(), RPCError> {
+        match self.tx.send(&[buf]) {
+            true => Ok(()),
+            false => Err(RPCError::TransportError),
+        }
+    }
+
+    fn try_send(&self, buf: &[u8]) -> Result<bool, RPCError> {
+        Ok(self.tx.try_send(&[buf]))
+    }
+
+    fn recv(&self, buf: &mut [u8]) -> Result<(), RPCError> {
+        self.rx.recv(&mut [buf]);
+        Ok(())
+    }
+
+    fn try_recv(&self, buf: &mut [u8]) -> Result<bool, RPCError> {
+        match self.rx.try_recv(&mut [buf]) {
+            Ok(_) => Ok(true),
+            Err(_) => Ok(false),
+        }
     }
 }
 
@@ -27,35 +54,116 @@ impl<'a> Transport for ShmemTransport<'a> {
         QUEUE_ENTRY_SIZE
     }
 
-    /// Send data to a remote node
-    fn send(&self, data_out: &[u8]) -> Result<(), RPCError> {
-        if data_out.is_empty() {
-            return Ok(());
-        }
-
-        match self.tx.send(&data_out) {
+    fn send_mbuf(&self, mbuf: &MBuf) -> Result<(), RPCError> {
+        match self
+            .tx
+            .send(&[&unsafe { mbuf.as_bytes() }[..HDR_LEN + mbuf.hdr.msg_len as usize]])
+        {
             true => Ok(()),
             false => Err(RPCError::TransportError),
         }
     }
 
-    /// Receive data from a remote node
-    fn recv(&self, data_in: &mut [u8]) -> Result<(), RPCError> {
-        if data_in.is_empty() {
-            return Ok(());
-        }
+    fn try_send_mbuf(&self, mbuf: &MBuf) -> Result<bool, RPCError> {
+        Ok(self
+            .tx
+            .try_send(&[&unsafe { mbuf.as_bytes() }[..HDR_LEN + mbuf.hdr.msg_len as usize]]))
+    }
 
-        // TODO: how to handle didn't all fit in one entry?
-        self.rx.recv(data_in);
+    fn recv_mbuf(&self, mbuf: &mut MBuf) -> Result<(), RPCError> {
+        self.rx.recv(&mut [&mut unsafe { mbuf.as_mut_bytes() }[..]]);
         Ok(())
     }
 
-    /// Controller-side implementation for LITE join_cluster()
+    fn try_recv_mbuf(&self, mbuf: &mut MBuf) -> Result<bool, RPCError> {
+        match self
+            .rx
+            .try_recv(&mut [&mut unsafe { mbuf.as_mut_bytes() }[..]])
+        {
+            Ok(_) => Ok(true),
+            Err(_) => Ok(false),
+        }
+    }
+
+    fn send_msg(&self, hdr: &RPCHeader, payload: &[&[u8]]) -> Result<(), RPCError> {
+        let mut pointers: [&[u8]; 7] = [&[1]; 7];
+        pointers[0] = unsafe { &hdr.as_bytes()[..] };
+        let mut index = 1;
+        for d in payload {
+            pointers[index] = d;
+            index += 1;
+        }
+        self.tx.send(&pointers[..payload.len() + 1]);
+        Ok(())
+    }
+
+    fn try_send_msg(&self, hdr: &RPCHeader, payload: &[&[u8]]) -> Result<bool, RPCError> {
+        let mut pointers: [&[u8]; 7] = [&[1]; 7];
+        pointers[0] = unsafe { &hdr.as_bytes()[..] };
+        let mut index = 1;
+        for d in payload {
+            pointers[index] = d;
+            index += 1;
+        }
+        Ok(self.tx.try_send(&pointers[..payload.len() + 1]))
+    }
+
+    fn recv_msg(&self, hdr: &mut RPCHeader, payload: &mut [&mut [u8]]) -> Result<(), RPCError> {
+        if payload.is_empty() {
+            self.rx.recv(&mut [unsafe { &mut hdr.as_mut_bytes()[..] }]);
+            return Ok(());
+        }
+        let mut pointers: [&mut [u8]; 7] = [
+            &mut [1],
+            &mut [1],
+            &mut [1],
+            &mut [1],
+            &mut [1],
+            &mut [1],
+            &mut [1],
+        ];
+        pointers[0] = unsafe { &mut hdr.as_mut_bytes()[..] };
+        let mut index = 1;
+        let num_out = payload.len() + 1;
+        for p in payload {
+            pointers[index] = p;
+            index += 1;
+        }
+        self.rx.recv(&mut pointers[..num_out]);
+        Ok(())
+    }
+
+    fn try_recv_msg(
+        &self,
+        hdr: &mut RPCHeader,
+        payload: &mut [&mut [u8]],
+    ) -> Result<bool, RPCError> {
+        let mut pointers: [&mut [u8]; 7] = [
+            &mut [1],
+            &mut [1],
+            &mut [1],
+            &mut [1],
+            &mut [1],
+            &mut [1],
+            &mut [1],
+        ];
+        pointers[0] = unsafe { &mut hdr.as_mut_bytes()[..] };
+        let mut index = 1;
+        let num_out = payload.len() + 1;
+        for p in payload {
+            pointers[index] = p;
+            index += 1;
+        }
+        match self.rx.try_recv(&mut pointers[..num_out]) {
+            Ok(_) => Ok(true),
+            Err(_) => Ok(false),
+        }
+    }
+
     fn client_connect(&mut self) -> Result<(), RPCError> {
         Ok(())
     }
 
-    /// Client-side implementation for LITE join_cluster()
     fn server_accept(&self) -> Result<(), RPCError> {
         Ok(())
     }
@@ -89,10 +197,20 @@ mod tests {
         thread::spawn(move || {
             // In a new server thread, receive then send data
             let mut server_data = [0u8; QUEUE_ENTRY_SIZE];
-            server_transport
-                .recv(&mut server_data[0..send_data.len()])
-                .unwrap();
+            assert_eq!(
+                true,
+                server_transport
+                    .try_recv(&mut server_data[0..send_data.len()])
+                    .unwrap()
+            );
             assert_eq!(&send_data, &server_data[0..send_data.len()]);
+            server_transport.send(&send_data).unwrap();
+            assert_eq!(
+                false,
+                server_transport
+                    .try_recv(&mut server_data[0..send_data.len()])
+                    .unwrap()
+            );
             server_transport.send(&send_data).unwrap();
         });
 
@@ -102,6 +220,13 @@ mod tests {
         client_transport
             .recv(&mut client_data[0..send_data.len()])
             .unwrap();
+        assert_eq!(&send_data, &client_data[0..send_data.len()]);
+        assert_eq!(
+            true,
+            client_transport
+                .try_recv(&mut client_data[0..send_data.len()])
+                .unwrap()
+        );
         assert_eq!(&send_data, &client_data[0..send_data.len()]);
     }
 

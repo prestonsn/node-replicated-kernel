@@ -8,7 +8,7 @@ use alloc::vec::Vec;
 use core::arch::asm;
 use core::cell::RefCell;
 use core::cmp::PartialEq;
-use core::ops::{Deref, DerefMut};
+use core::iter::Iterator;
 use core::{fmt, ptr};
 
 use arrayvec::ArrayVec;
@@ -31,7 +31,7 @@ use crate::memory::vspace::{AddressSpace, MapAction};
 use crate::memory::{paddr_to_kernel_vaddr, Frame, KernelAllocator, MemType, PAddr, VAddr};
 use crate::nrproc::NrProcess;
 use crate::process::{
-    Eid, Executor, Pid, Process, ResumeHandle, MAX_FRAMES_PER_PROCESS, MAX_PROCESSES,
+    Eid, Executor, FrameManagement, Pid, Process, ProcessFrames, ResumeHandle, MAX_PROCESSES,
     MAX_WRITEABLE_SECTIONS_PER_PROCESS,
 };
 use crate::round_up;
@@ -118,101 +118,6 @@ impl crate::nrproc::ProcessManager for ArchProcessManagement {
         MAX_NUMA_NODES,
     > {
         &*super::process::PROCESS_TABLE
-    }
-}
-
-pub(crate) struct UserPtr<T> {
-    value: *mut T,
-}
-
-impl<T> UserPtr<T> {
-    // - is *mut T a good type? Maybe should be VAddr?
-    //  - Do we need to check alignment?
-    // - We need to check that it's not some illegal/kernel address
-    //   - Return type should probably be Result<UserPtr>
-    // - We need to check that it's accessible / mapped in the process' address
-    //   space
-    //   - Should the check happen during Deref (more lazy) or upfront in new()
-    //     (what if we might not up accessing it?)
-    //   - Is this enough? what if it's a PCI BAR address would this be bad?
-    pub(crate) fn new(pointer: *mut T) -> UserPtr<T> {
-        UserPtr { value: pointer }
-    }
-
-    pub(crate) fn vaddr(&self) -> VAddr {
-        VAddr::from(self.value as u64)
-    }
-}
-
-impl<T> Deref for UserPtr<T> {
-    type Target = T;
-    // - We need to check that we're still in the process' address space on
-    //   Deref
-    //   - Maybe we can only deref this in a closure/well defined block?
-    // - We need to enable x86 user-space access stuff
-    // - How do we know this T will have been properly initialized? We don't.
-    //   - Should we treat this as MaybeUninit<T>
-    //   - Should we just have implementations for basic/POD types?
-    fn deref(&self) -> &Self::Target {
-        unsafe {
-            rflags::stac();
-            &*self.value
-        }
-    }
-}
-
-impl<T> DerefMut for UserPtr<T> {
-    // See Deref Concerns
-    // - If mapped read-only in user-space, we shouldn't try to modify it
-    //   through user-space address but have to go through kernel physical
-    fn deref_mut(&mut self) -> &mut T {
-        unsafe {
-            rflags::stac();
-            &mut *self.value
-        }
-    }
-}
-
-impl<T> Drop for UserPtr<T> {
-    // - This is also not ideal: enforce security is re-enabled immediately
-    //   after use?
-    fn drop(&mut self) {
-        unsafe { rflags::clac() };
-    }
-}
-
-pub(crate) struct UserValue<T> {
-    value: T,
-}
-
-impl<T> UserValue<T> {
-    pub(crate) fn new(pointer: T) -> UserValue<T> {
-        UserValue { value: pointer }
-    }
-}
-
-impl<T> Deref for UserValue<T> {
-    type Target = T;
-    fn deref(&self) -> &T {
-        unsafe {
-            rflags::stac();
-            &self.value
-        }
-    }
-}
-
-impl<T> DerefMut for UserValue<T> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        unsafe {
-            rflags::stac();
-            &mut self.value
-        }
-    }
-}
-
-impl<T> Drop for UserValue<T> {
-    fn drop(&mut self) {
-        unsafe { rflags::clac() };
     }
 }
 
@@ -813,8 +718,14 @@ impl Ring3Executor {
         }
     }
 
-    pub(crate) fn vcpu(&self) -> UserPtr<kpi::arch::VirtualCpu> {
-        UserPtr::new(self.vcpu_ctl.as_mut_ptr())
+    /// Get access to the executors' vcpu area.
+    ///
+    /// # Safety
+    /// - Caller needs to ensure it doesn't accidentially create two mutable
+    ///   aliasable pointers to the same memory.
+    /// - TODO(api): A safer API for this might be appreciated.
+    pub(crate) fn vcpu(&self) -> &mut kpi::arch::VirtualCpu {
+        unsafe { &mut *self.vcpu_ctl_kernel.as_mut_ptr() }
     }
 
     pub(crate) fn vcpu_addr(&self) -> VAddr {
@@ -873,7 +784,7 @@ impl Executor for Ring3Executor {
 
             let entry_point = unsafe { (*self.vcpu_kernel()).resume_with_upcall };
             trace!("Added core entry point is at {:#x}", entry_point);
-            let cpu_ctl = self.vcpu().vaddr().as_u64();
+            let cpu_ctl = self.vcpu_addr().as_u64();
 
             Ring3Resumer::new_upcall(
                 entry_point,
@@ -905,7 +816,7 @@ impl Executor for Ring3Executor {
 
         self.maybe_switch_vspace();
         let entry_point = self.vcpu().resume_with_upcall;
-        let cpu_ctl = self.vcpu().vaddr().as_u64();
+        let cpu_ctl = self.vcpu_addr().as_u64();
 
         Ring3Resumer::new_upcall(
             entry_point,
@@ -948,7 +859,7 @@ pub(crate) struct Ring3Process {
     /// File descriptors for the opened file.
     pub fds: ArrayVec<Option<FileDescriptorEntry>, MAX_FILES_PER_PROCESS>,
     /// Physical frame objects registered to the process.
-    pub frames: ArrayVec<Option<Frame>, MAX_FRAMES_PER_PROCESS>,
+    pub pfm: ProcessFrames,
     /// Frames of the writeable ELF data section (shared across all replicated Process structs)
     pub writeable_sections: ArrayVec<Frame, MAX_WRITEABLE_SECTIONS_PER_PROCESS>,
     /// Section in ELF where last read-only header is
@@ -968,8 +879,7 @@ impl Ring3Process {
         let fds: ArrayVec<Option<FileDescriptorEntry>, MAX_FILES_PER_PROCESS> =
             ArrayVec::from([NONE_FD; MAX_FILES_PER_PROCESS]);
 
-        let frames: ArrayVec<Option<Frame>, MAX_FRAMES_PER_PROCESS> =
-            ArrayVec::from([None; MAX_FRAMES_PER_PROCESS]);
+        let pfm = ProcessFrames::default();
 
         Ok(Ring3Process {
             pid: pid,
@@ -981,7 +891,7 @@ impl Ring3Process {
             executor_offset: VAddr::from(EXECUTOR_OFFSET),
             fds,
             pinfo: Default::default(),
-            frames,
+            pfm,
             writeable_sections: ArrayVec::new(),
             read_only_offset: VAddr::zero(),
         })
@@ -1026,11 +936,11 @@ impl elfloader::ElfLoader for Ring3Process {
                 (false, false, false) => panic!("MapAction::None"),
                 (true, false, false) => panic!("MapAction::None"),
                 (false, true, false) => panic!("MapAction::None"),
-                (false, false, true) => MapAction::ReadUser,
-                (true, false, true) => MapAction::ReadExecuteUser,
+                (false, false, true) => MapAction::user(),
+                (true, false, true) => MapAction::execute(),
                 (true, true, false) => panic!("MapAction::None"),
-                (false, true, true) => MapAction::ReadWriteUser,
-                (true, true, true) => MapAction::ReadWriteExecuteUser,
+                (false, true, true) => MapAction::write(),
+                (true, true, true) => MapAction::execute() | MapAction::write(),
             };
 
             info!(
@@ -1075,10 +985,7 @@ impl elfloader::ElfLoader for Ring3Process {
                     frame
                 } else {
                     // A read-only program header we can replicate:
-                    assert!(
-                        map_action == MapAction::ReadUser
-                            || map_action == MapAction::ReadExecuteUser
-                    );
+                    assert!(map_action.is_readable() && !map_action.is_writable());
                     let mut pmanager = pcm.mem_manager();
                     pmanager
                         .allocate_large_page()
@@ -1328,53 +1235,61 @@ impl Process for Ring3Process {
         let executors_to_create = memory.size() / executor_space_requirement;
 
         KernelAllocator::try_refill_tcache(20, 0, MemType::Mem).expect("Refill didn't work");
-        {
-            self.vspace
-                .map_frame(self.executor_offset, memory, MapAction::ReadWriteUser)
-                .expect("Can't map user-space executor memory.");
-
-            info!(
-                "executor space base expanded {:#x} size: {} end {:#x}",
+        self.vspace
+            .map_frame(
                 self.executor_offset,
-                memory.size(),
-                self.executor_offset + memory.size()
-            );
-        }
+                memory,
+                MapAction::user() | MapAction::write(),
+            )
+            .expect("Can't map user-space executor memory.");
+        info!(
+            "executor space base expanded {:#x} size: {} end {:#x}",
+            self.executor_offset,
+            memory.size(),
+            self.executor_offset + memory.size()
+        );
 
-        let cur_paddr_offset = memory.base;
-        let mut cur_offset = self.executor_offset;
-        for _cnt in 0..executors_to_create {
-            let executor_vmem_start = cur_offset;
-            let executor_pmem_start = cur_paddr_offset;
+        let executor_space = executor_space_requirement * executors_to_create;
+        let prange = memory.base..memory.base + executor_space;
+        let vrange = self.executor_offset..self.executor_offset + executor_space;
 
+        for (executor_pmem_start, executor_vmem_start) in prange
+            .step_by(executor_space_requirement)
+            .zip(vrange.step_by(executor_space_requirement))
+        {
             let executor_vmem_end = executor_vmem_start + executor_space_requirement;
-            let _executor_pmem_end = executor_pmem_start + executor_space_requirement;
-
-            let _upcall_stack_base = cur_offset + Ring3Executor::INIT_STACK_SIZE;
-            let _vcpu_ctl =
-                cur_offset + Ring3Executor::INIT_STACK_SIZE + Ring3Executor::UPCALL_STACK_SIZE;
-            let vcpu_ctl_paddr = cur_paddr_offset
+            let vcpu_ctl = executor_vmem_start
                 + Ring3Executor::INIT_STACK_SIZE
                 + Ring3Executor::UPCALL_STACK_SIZE;
+            let vcpu_ctl_paddr = executor_pmem_start
+                + Ring3Executor::INIT_STACK_SIZE
+                + Ring3Executor::UPCALL_STACK_SIZE;
+            let vcpu_ctl_kernel = crate::memory::paddr_to_kernel_vaddr(PAddr::from(vcpu_ctl_paddr));
+            trace!(
+                "vcpu_ctl vaddr {:#x} vcpu_ctl paddr {:#x} vcpu_ctl_kernel {:#x}",
+                vcpu_ctl,
+                vcpu_ctl_paddr,
+                vcpu_ctl_kernel
+            );
 
             let executor = Box::try_new(Ring3Executor::new(
                 &self,
                 self.current_eid,
-                crate::memory::paddr_to_kernel_vaddr(PAddr::from(vcpu_ctl_paddr)),
+                vcpu_ctl_kernel,
                 (executor_vmem_start, executor_vmem_end),
                 memory.affinity,
             ))?;
 
             debug!("Created {} affinity {}", executor, memory.affinity);
 
-            // TODO(error-handling): Check that this properly unwinds on alloc errors...
+            // TODO(error-handling): Needs to properly unwind on alloc errors
+            // (e.g., have something that frees vcpu mem etc. on drop())
             match &mut self.executor_cache[memory.affinity as usize] {
                 Some(ref mut vector) => vector.try_push(executor)?,
                 None => self.executor_cache[memory.affinity as usize] = Some(try_vec![executor]?),
             }
 
             self.current_eid += 1;
-            cur_offset += executor_space_requirement;
         }
 
         debug!(
@@ -1418,33 +1333,27 @@ impl Process for Ring3Process {
     fn pinfo(&self) -> &kpi::process::ProcessInfo {
         &self.pinfo
     }
+}
 
+impl FrameManagement for Ring3Process {
     fn add_frame(&mut self, frame: Frame) -> Result<FrameId, KError> {
-        if let Some(fid) = self.frames.iter().position(|fid| fid.is_none()) {
-            self.frames[fid] = Some(frame);
-            Ok(fid)
-        } else {
-            Err(KError::TooManyRegisteredFrames)
-        }
+        self.pfm.add_frame(frame)
     }
 
-    fn get_frame(&mut self, frame_id: FrameId) -> Result<Frame, KError> {
-        self.frames
-            .get(frame_id)
-            .cloned()
-            .flatten()
-            .ok_or(KError::InvalidFrameId)
+    fn get_frame(&mut self, frame_id: FrameId) -> Result<(Frame, usize), KError> {
+        self.pfm.get_frame(frame_id)
+    }
+
+    fn add_frame_mapping(&mut self, frame_id: FrameId, vaddr: VAddr) -> Result<(), KError> {
+        self.pfm.add_frame_mapping(frame_id, vaddr)
+    }
+
+    fn remove_frame_mapping(&mut self, paddr: PAddr, _vaddr: VAddr) -> Result<(), KError> {
+        self.pfm.remove_frame_mapping(paddr, _vaddr)
     }
 
     fn deallocate_frame(&mut self, fid: FrameId) -> Result<Frame, KError> {
-        match self.frames.get_mut(fid) {
-            Some(maybe_frame) => {
-                let mut old = None;
-                core::mem::swap(&mut old, maybe_frame);
-                old.ok_or(KError::InvalidFileDescriptor)
-            }
-            _ => Err(KError::InvalidFileDescriptor),
-        }
+        self.pfm.deallocate_frame(fid)
     }
 }
 

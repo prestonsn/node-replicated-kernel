@@ -73,6 +73,135 @@ fn alloc_test() {
     info!("alloc_test OK");
 }
 
+fn alloc_physical_test() {
+    use x86::bits64::paging::{PAddr, BASE_PAGE_SIZE, LARGE_PAGE_SIZE};
+
+    // Create base for the mapping
+    let base: u64 = 0x0510_0000_0000;
+
+    // Test allocation by checking to see if we can map it okay
+    unsafe {
+        // Allocate a base page of physical memory
+        let (frame_id, paddr) = vibrio::syscalls::PhysicalMemory::allocate_base_page()
+            .expect("Failed to get physical memory base page");
+        info!("base frame id={:?}, paddr={:?}", frame_id, paddr);
+
+        vibrio::syscalls::VSpace::map_frame(frame_id, base).expect("Failed to map base page");
+        let slice: &mut [u8] = from_raw_parts_mut(base as *mut u8, BASE_PAGE_SIZE);
+        for i in slice.iter_mut() {
+            *i = 0xb;
+        }
+        assert_eq!(slice[99], 0xb);
+
+        // We should not(?) be able to "map" it again if we specify the same
+        // address
+        //
+        // This currently succeeds (and worse counts up the refcount), it should
+        // probably fail with AlreadyMapped
+        //
+        //vibrio::syscalls::VSpace::map_frame(frame_id, base).expect("Failed to
+        //map base page");
+
+        // We should be able to "map" it again at a different address
+        vibrio::syscalls::VSpace::map_frame(frame_id, base + 0x1000).expect("Can't map twice?");
+
+        // We should be able to unmap it (then release frame will just release the frame id)
+        vibrio::syscalls::VSpace::unmap(base, BASE_PAGE_SIZE as u64).expect("Unmap syscall failed");
+
+        // We shouldn't be able to release it since it's still mapped once
+        vibrio::syscalls::PhysicalMemory::release_frame(frame_id)
+            .expect_err("Shouldn't be able to release physical memory base page yet");
+
+        // We should be able to unmap it (then release frame will just release the frame id)
+        vibrio::syscalls::VSpace::unmap(base + 0x1000, BASE_PAGE_SIZE as u64)
+            .expect("Unmap syscall failed");
+
+        // We shouldn't be able to release it since it's still mapped once
+        vibrio::syscalls::PhysicalMemory::release_frame(frame_id)
+            .expect("Now release_frame should succeed (unmapped everywhere)");
+    }
+
+    // Allocate a large page of physical memory
+    let (frame_id2, paddr2) = vibrio::syscalls::PhysicalMemory::allocate_large_page()
+        .expect("Failed to get physical memory large page");
+    info!("large frame id={:?}, paddr={:?}", frame_id2, paddr2);
+
+    // Test allocation by checking to see if we can map it okay
+    unsafe {
+        vibrio::syscalls::VSpace::map_frame(frame_id2, base).expect("Failed to map large page");
+        let slice2: &mut [u8] = from_raw_parts_mut(base as *mut u8, LARGE_PAGE_SIZE);
+        for i in slice2.iter_mut() {
+            *i = 0xc;
+        }
+        assert_eq!(slice2[99], 0xc);
+        vibrio::syscalls::VSpace::unmap(base, LARGE_PAGE_SIZE as u64)
+            .expect("Unmap syscall failed");
+    }
+
+    // Release large page
+    vibrio::syscalls::PhysicalMemory::release_frame(frame_id2)
+        .expect("Failed to release physical memory large page");
+
+    info!("phys_alloc_test OK");
+}
+
+// Just used for rackscale right now, not for standalone
+fn request_core_remote_test() {
+    let s = &vibrio::upcalls::PROCESS_SCHEDULER;
+
+    let threads = vibrio::syscalls::System::threads().expect("Can't get system topology");
+    info!("threads: {:?}", threads);
+
+    let core_id = vibrio::syscalls::System::core_id().expect("Can't get core id");
+
+    let NUM_CLIENTS = 2; // TODO: this value change tests
+
+    // Only one client will run this, because these are global IDs
+    if core_id == 0 {
+        for thread in threads.iter() {
+            // Ignore core 0 on each client, assume it is already running init procress
+            if thread.id >= NUM_CLIENTS {
+                let r = vibrio::syscalls::Process::request_core(
+                    thread.id, // in rackscale mode, thread.id is ignores - the ctoken is the valid value
+                    VAddr::from(vibrio::upcalls::upcall_while_enabled as *const fn() as u64),
+                );
+                match r {
+                    Ok(ctoken) => {
+                        info!("Spawned core on {:?} <-> {}", ctoken, thread.id);
+                    }
+                    Err(_e) => {
+                        panic!("Failed to spawn to core {}", thread.id);
+                    }
+                }
+            }
+        }
+
+        /*
+        for thread in threads {
+                s.spawn(
+                    32 * 4096,
+                    move |_| {
+                        info!(
+                            "Hello from core {}",
+                            lineup::tls2::Environment::scheduler().core_id
+                        );
+                    },
+                    ptr::null_mut(),
+                    thread.id,
+                    None,
+                );
+        }
+        */
+    }
+    info!("request_core_remote_test OK");
+
+    // Run scheduler on core 0
+    let scb: SchedulerControlBlock = SchedulerControlBlock::new(0);
+    loop {
+        s.run(&scb);
+    }
+}
+
 fn scheduler_smp_test() {
     let s = &vibrio::upcalls::PROCESS_SCHEDULER;
 
@@ -731,6 +860,12 @@ pub extern "C" fn _start() -> ! {
 
     #[cfg(feature = "test-pmem-alloc")]
     pmem_alloc(ncores);
+
+    #[cfg(feature = "test-phys-alloc")]
+    alloc_physical_test();
+
+    #[cfg(feature = "test-request-core-remote")]
+    request_core_remote_test();
 
     #[cfg(feature = "test-scheduler")]
     scheduler_test();

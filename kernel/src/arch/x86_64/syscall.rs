@@ -1,9 +1,11 @@
 // Copyright © 2021 VMware, Inc. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
+use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::convert::TryInto;
 
+use abomonation::encode;
 use fallible_collections::{FallibleVec, FallibleVecGlobal};
 use log::{debug, info, trace, warn};
 use x86::bits64::paging::{PAddr, VAddr, BASE_PAGE_SIZE, LARGE_PAGE_SIZE};
@@ -16,15 +18,16 @@ use kpi::{MemType, SystemCallError};
 use crate::arch::process::current_pid;
 use crate::cmdline::CommandLineArguments;
 use crate::error::KError;
+use crate::memory::backends::PhysicalPageProvider;
 use crate::memory::vspace::MapAction;
 use crate::memory::Frame;
 use crate::nr;
 use crate::nrproc::NrProcess;
-use crate::process::{ResumeHandle, UVAddr, UserSlice};
+use crate::process::{ResumeHandle, SliceAccess, UVAddr, UserSlice};
 use crate::syscalls::{ProcessDispatch, SystemCallDispatch, SystemDispatch, VSpaceDispatch};
 
 use super::gdt::GdtTable;
-use super::process::{Ring3Process, UserValue};
+use super::process::Ring3Process;
 use super::serial::SerialControl;
 
 extern "C" {
@@ -78,8 +81,14 @@ impl<T: Arch86SystemDispatch> SystemDispatch<u64> for T {
             })?;
         }
 
-        // TODO(dependency): Get rid of serde/serde_cbor, use something sane instead
-        let serialized = serde_cbor::to_vec(&return_threads).unwrap();
+        // We know that we will need room for at least all of the hw threads. abomonation
+        // may increase size as needed.
+        let mut serialized =
+            Vec::try_with_capacity(num_threads * core::mem::size_of::<kpi::system::CpuThread>())
+                .expect("Failed to allocate memory for serialized data");
+        unsafe { encode(&return_threads, &mut serialized) }
+            .expect("Failed to serialize hw_threads");
+
         if serialized.len() <= vaddr_buf_len as usize {
             let mut user_slice = UserSlice::new(
                 current_pid()?,
@@ -109,19 +118,16 @@ impl<T: Arch86SystemDispatch> SystemDispatch<u64> for T {
 pub(crate) trait Arch86ProcessDispatch {}
 
 impl<T: Arch86ProcessDispatch> ProcessDispatch<u64> for T {
-    fn log(&self, buffer_arg: u64, len: u64) -> Result<(u64, u64), KError> {
-        // TODO: some scary unsafe logic here that needs sanitization
-        let buffer: *const u8 = buffer_arg as *const u8;
-        let len: usize = len as usize;
+    fn log(&self, buffer: UserSlice) -> Result<(u64, u64), KError> {
+        buffer.read_slice(Box::try_new(|uslice| {
+            if let Ok(s) = core::str::from_utf8(uslice) {
+                SerialControl::buffered_print(s);
+            } else {
+                warn!("log: invalid UTF-8 string: {:?}", uslice);
+            }
 
-        let user_str = unsafe {
-            let slice = core::slice::from_raw_parts(buffer, len);
-            core::str::from_utf8_unchecked(slice)
-        };
-
-        let user_buffer = UserValue::new(user_str);
-        let buffer: &str = *user_buffer;
-        SerialControl::buffered_print(buffer);
+            Ok(())
+        })?)?;
 
         Ok((0, 0))
     }
@@ -227,6 +233,45 @@ impl<T: Arch86ProcessDispatch> ProcessDispatch<u64> for T {
         Ok((fid as u64, frame.base.as_u64()))
     }
 
+    fn release_physical(&self, fid: u64) -> Result<(u64, u64), KError> {
+        // Fetch the frame and release from the process
+        let pid = current_pid()?;
+        let frame = NrProcess::<Ring3Process>::release_frame_from_process(pid, fid as FrameId)?;
+
+        // Release the frame (need to make sure we drop pmanager again before we
+        // go to NR):
+        let pcm = super::kcb::per_core_mem();
+        let mut pmanager = pcm.mem_manager();
+
+        // This entire logic should probably go into [`GlobalMemory`]:
+        if frame.size == BASE_PAGE_SIZE {
+            match pmanager.release_base_page(frame) {
+                Ok(_) => {}
+                Err(KError::CacheFull) => {
+                    pcm.gmanager.map(|g| {
+                        let mut gmanager = g.node_caches[frame.affinity].lock();
+                        gmanager.release_base_page(frame).expect("Can't fail");
+                    });
+                }
+                Err(e) => return Err(e),
+            }
+        } else {
+            assert_eq!(frame.size, LARGE_PAGE_SIZE);
+            match pmanager.release_large_page(frame) {
+                Ok(_) => {}
+                Err(KError::CacheFull) => {
+                    pcm.gmanager.map(|g| {
+                        let mut gmanager = g.node_caches[frame.affinity].lock();
+                        gmanager.release_large_page(frame).expect("Can't fail");
+                    });
+                }
+                Err(e) => return Err(e),
+            }
+        }
+
+        Ok((0, 0))
+    }
+
     fn exit(&self, code: u64) -> Result<(u64, u64), KError> {
         debug!("Process got exit, we are done for now...");
         // TODO: For now just a dummy version that exits Qemu
@@ -292,13 +337,8 @@ pub(crate) trait Arch86VSpaceDispatch {
             }
         }
 
-        NrProcess::<Ring3Process>::map_frames(
-            current_pid()?,
-            base,
-            frames,
-            MapAction::ReadWriteUser,
-        )
-        .expect("Can't map memory");
+        NrProcess::<Ring3Process>::map_frames(current_pid()?, base, frames, MapAction::write())
+            .expect("Can't map memory");
 
         Ok((paddr.unwrap().as_u64(), total_len as u64))
     }
@@ -309,7 +349,7 @@ pub(crate) trait Arch86VSpaceDispatch {
 
         let handle = NrProcess::<Ring3Process>::unmap(pid, base)?;
         let va: u64 = handle.vaddr.as_u64();
-        let sz: u64 = handle.frame.size as u64;
+        let sz: u64 = handle.size as u64;
         super::tlb::shootdown(handle);
 
         Ok((va, sz))
@@ -334,7 +374,7 @@ impl<T: Arch86VSpaceDispatch> VSpaceDispatch<u64> for T {
         let size = size.try_into().unwrap();
         let frame = Frame::new(paddr, size, *crate::environment::NODE_ID);
 
-        NrProcess::<Ring3Process>::map_device_frame(pid, frame, MapAction::ReadWriteUser)
+        NrProcess::<Ring3Process>::map_device_frame(pid, frame, MapAction::write())
     }
 
     fn map_frame_id(&self, base: u64, frame_id: u64) -> Result<(u64, u64), KError> {
@@ -343,8 +383,12 @@ impl<T: Arch86VSpaceDispatch> VSpaceDispatch<u64> for T {
         let base = VAddr::from(base);
         let frame_id: FrameId = frame_id.try_into().map_err(|_e| KError::InvalidFrameId)?;
 
-        let (paddr, size) =
-            NrProcess::<Ring3Process>::map_frame_id(pid, frame_id, base, MapAction::ReadWriteUser)?;
+        let (paddr, size) = NrProcess::<Ring3Process>::map_frame_id(
+            pid,
+            frame_id,
+            base,
+            MapAction::user() | MapAction::write() | MapAction::aliased(),
+        )?;
         Ok((paddr.as_u64(), size as u64))
     }
 
@@ -439,7 +483,9 @@ pub extern "C" fn syscall_handle(
         let dispatch = Arch86SystemCall;
         dispatch.handle(function, arg1, arg2, arg3, arg4, arg5)
     } else {
-        let dispatch = super::rackscale::syscalls::Arch86LwkSystemCall;
+        let dispatch = super::rackscale::syscalls::Arch86LwkSystemCall {
+            local: Arch86SystemCall,
+        };
         dispatch.handle(function, arg1, arg2, arg3, arg4, arg5)
     };
 

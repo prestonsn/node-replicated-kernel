@@ -259,7 +259,7 @@ fn _start(argc: isize, _argv: *const *const u8) -> isize {
 
     klogger::init(
         crate::CMDLINE.get().map(|c| c.log_filter).unwrap_or("info"),
-        debug::SERIAL_PRINT_PORT.load(Ordering::Relaxed),
+        debug::SERIAL_PRINT_PORT.load(Ordering::Relaxed) as u64,
     )
     .expect("Can't set-up logging");
 
@@ -414,7 +414,8 @@ fn _start(argc: isize, _argv: *const *const u8) -> isize {
         .get()
         .map_or(false, |c| c.mode == crate::cmdline::Mode::Client)
     {
-        let _ = spin::lazy::Lazy::force(&rackscale::RPC_CLIENT);
+        // Force client instantiation
+        let _ = rackscale::client::RPC_CLIENT.clone();
     }
 
     // nvme.

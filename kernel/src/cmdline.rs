@@ -33,6 +33,13 @@ enum CmdToken {
     #[token("transport")]
     Transport,
 
+    /// An identifier (unique number) for the machine -- for rackscale arch.
+    #[token("mid")]
+    MachineId,
+
+    #[token("workers")]
+    Workers,
+
     /// Init binary (which is loaded by default)
     #[token("init")]
     InitBinary,
@@ -113,6 +120,8 @@ pub(crate) struct CommandLineArguments {
     pub test: Option<&'static str>,
     pub mode: Mode,
     pub transport: Transport,
+    pub machine_id: u8,
+    pub workers: u8,
 }
 // If you move or rename `CommandLineArguments`, you may also need to update the `s02_gdb` test.
 static_assertions::assert_type_eq_all!(CommandLineArguments, crate::cmdline::CommandLineArguments);
@@ -127,6 +136,8 @@ impl Default for CommandLineArguments {
             test: None,
             mode: Mode::Native,
             transport: Transport::Shmem,
+            machine_id: 0,
+            workers: 1,
         }
     }
 }
@@ -161,7 +172,9 @@ impl CommandLineArguments {
                 | CmdToken::Test
                 | CmdToken::InitBinary
                 | CmdToken::InitArgs
-                | CmdToken::AppArgs => {
+                | CmdToken::AppArgs
+                | CmdToken::MachineId
+                | CmdToken::Workers => {
                     prev = token;
                 }
                 CmdToken::Ident => match prev {
@@ -185,6 +198,14 @@ impl CommandLineArguments {
                         parsed_args.init_args = slice;
                         prev = CmdToken::Error;
                     }
+                    CmdToken::MachineId => {
+                        parsed_args.machine_id = slice.parse::<u8>().unwrap_or(0x0);
+                        prev = CmdToken::Error;
+                    }
+                    CmdToken::Workers => {
+                        parsed_args.workers = slice.parse::<u8>().unwrap_or(0x1);
+                        prev = CmdToken::Error;
+                    }
                     CmdToken::AppArgs => {
                         parsed_args.app_args = slice;
                         prev = CmdToken::Error;
@@ -204,6 +225,8 @@ impl CommandLineArguments {
                         && prev != CmdToken::InitArgs
                         && prev != CmdToken::AppArgs
                         && prev != CmdToken::Test
+                        && prev != CmdToken::MachineId
+                        && prev != CmdToken::Workers
                     {
                         error!("Malformed args (unexpected equal sign) in {}", args);
                         continue;
@@ -231,6 +254,14 @@ impl CommandLineArguments {
                         }
                         CmdToken::Test => {
                             parsed_args.test = Some(slice_no_quote);
+                            prev = CmdToken::Error;
+                        }
+                        CmdToken::MachineId => {
+                            parsed_args.machine_id = slice_no_quote.parse::<u8>().unwrap_or(0x0);
+                            prev = CmdToken::Error;
+                        }
+                        CmdToken::Workers => {
+                            parsed_args.workers = slice_no_quote.parse::<u8>().unwrap_or(0x1);
                             prev = CmdToken::Error;
                         }
                         _ => {
@@ -390,5 +421,35 @@ mod test {
         let args = "./kernel test=userspace";
         let ba = CommandLineArguments::from_str(args);
         assert_eq!(ba.test, Some("userspace"));
+    }
+
+    #[test]
+    fn parse_machine_id() {
+        let args = "./kernel mid=3";
+        let ba = CommandLineArguments::from_str(args);
+        assert_eq!(ba.machine_id, 3);
+
+        let args = "./kernel mid='44'";
+        let ba = CommandLineArguments::from_str(args);
+        assert_eq!(ba.machine_id, 44);
+
+        let args = "./kernel mid=a";
+        let ba = CommandLineArguments::from_str(args);
+        assert_eq!(ba.machine_id, 0);
+    }
+
+    #[test]
+    fn parse_workers() {
+        let args = "./kernel workers=3";
+        let ba = CommandLineArguments::from_str(args);
+        assert_eq!(ba.workers, 3);
+
+        let args = "./kernel workers='44'";
+        let ba = CommandLineArguments::from_str(args);
+        assert_eq!(ba.workers, 44);
+
+        let args = "./kernel workers=a";
+        let ba = CommandLineArguments::from_str(args);
+        assert_eq!(ba.workers, 1);
     }
 }

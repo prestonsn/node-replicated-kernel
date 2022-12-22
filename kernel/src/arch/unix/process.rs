@@ -21,12 +21,13 @@ use crate::error::{KError, KResult};
 use crate::fs::fd::FileDescriptorEntry;
 use crate::fs::MAX_FILES_PER_PROCESS;
 use crate::memory::detmem::DA;
-use crate::memory::vspace::AddressSpace;
 use crate::memory::vspace::MapAction;
+use crate::memory::vspace::{AddressSpace, TlbFlushHandle};
 use crate::memory::{Frame, VAddr, LARGE_PAGE_SIZE};
 use crate::nrproc::NrProcess;
 use crate::process::{
-    Eid, Executor, Pid, Process, ResumeHandle, MAX_FRAMES_PER_PROCESS, MAX_PROCESSES,
+    Eid, Executor, FrameManagement, Pid, Process, ResumeHandle, MAX_FRAMES_PER_PROCESS,
+    MAX_PROCESSES,
 };
 
 use super::debug;
@@ -114,101 +115,6 @@ impl crate::nrproc::ProcessManager for ArchProcessManagement {
     }
 }
 
-pub(crate) fn user_virt_addr_valid(
-    _pid: Pid,
-    _base: u64,
-    _size: u64,
-) -> Result<(u64, u64), KError> {
-    Ok((0, 0))
-}
-
-/// TODO: This code is same as x86_64 process. Can we remove it?
-pub(crate) struct UserPtr<T> {
-    value: *mut T,
-}
-
-impl<T> UserPtr<T> {
-    pub(crate) fn new(pointer: *mut T) -> UserPtr<T> {
-        UserPtr { value: pointer }
-    }
-
-    pub(crate) fn vaddr(&self) -> VAddr {
-        VAddr::from(self.value as u64)
-    }
-}
-
-impl<T> Deref for UserPtr<T> {
-    type Target = T;
-    fn deref(&self) -> &Self::Target {
-        unsafe { &*self.value }
-    }
-}
-
-impl<T> DerefMut for UserPtr<T> {
-    fn deref_mut(&mut self) -> &mut T {
-        unsafe { &mut *self.value }
-    }
-}
-
-pub(crate) struct UserValue<T> {
-    value: T,
-}
-
-impl<T> UserValue<T> {
-    pub(crate) fn new(pointer: T) -> UserValue<T> {
-        UserValue { value: pointer }
-    }
-
-    pub(crate) fn as_mut_ptr(&mut self) -> *mut T {
-        unsafe { core::mem::transmute(&self.value) }
-    }
-}
-
-impl<T> Deref for UserValue<T> {
-    type Target = T;
-    fn deref(&self) -> &T {
-        &self.value
-    }
-}
-
-impl<T> DerefMut for UserValue<T> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.value
-    }
-}
-
-#[derive(Debug, Eq, PartialEq)]
-pub(crate) struct UserSlice<'a> {
-    pub buffer: &'a mut [u8],
-}
-
-impl<'a> UserSlice<'a> {
-    pub(crate) fn from_slice(buffer: &'a mut [u8]) -> Self {
-        UserSlice { buffer }
-    }
-
-    pub(crate) fn new(_pid: Pid, base: u64, len: usize) -> UserSlice<'a> {
-        let mut user_ptr = VAddr::from(base);
-        let slice_ptr = UserPtr::new(&mut user_ptr);
-        let user_slice: &mut [u8] =
-            unsafe { core::slice::from_raw_parts_mut(slice_ptr.as_mut_ptr(), len) };
-        UserSlice { buffer: user_slice }
-    }
-}
-
-impl<'a> Deref for UserSlice<'a> {
-    type Target = [u8];
-    fn deref(&self) -> &Self::Target {
-        &*self.buffer
-    }
-}
-
-impl<'a> DerefMut for UserSlice<'a> {
-    fn deref_mut(&mut self) -> &mut [u8] {
-        self.buffer
-    }
-}
-
 #[derive(Debug, Default)]
 pub(crate) struct UnixProcess {
     pid: Pid,
@@ -292,7 +198,7 @@ impl Process for UnixProcess {
         self.vspace.map_frame(
             VAddr::from(0x2000_0000),
             Frame::new(PAddr::zero(), 0x0, 0x0),
-            MapAction::None,
+            MapAction::none(),
         )
     }
 
@@ -354,16 +260,26 @@ impl Process for UnixProcess {
     fn pinfo(&self) -> &kpi::process::ProcessInfo {
         &self.pinfo
     }
+}
 
-    fn add_frame(&mut self, _frame: Frame) -> Result<FrameId, KError> {
+impl FrameManagement for UnixProcess {
+    fn add_frame(&mut self, frame: Frame) -> Result<FrameId, KError> {
         Err(KError::InvalidFrameId)
     }
 
-    fn get_frame(&mut self, _frame_id: FrameId) -> Result<Frame, KError> {
+    fn get_frame(&mut self, frame_id: FrameId) -> Result<(Frame, usize), KError> {
         Err(KError::InvalidFrameId)
     }
 
-    fn deallocate_frame(&mut self, _fid: FrameId) -> Result<Frame, KError> {
+    fn add_frame_mapping(&mut self, frame_id: FrameId, vaddr: VAddr) -> Result<(), KError> {
+        Err(KError::InvalidFrameId)
+    }
+
+    fn remove_frame_mapping(&mut self, paddr: PAddr, _vaddr: VAddr) -> Result<(), KError> {
+        Err(KError::InvalidFrameId)
+    }
+
+    fn deallocate_frame(&mut self, fid: FrameId) -> Result<Frame, KError> {
         Err(KError::InvalidFrameId)
     }
 }

@@ -5,6 +5,7 @@
 
 import argparse
 import os
+from pickletools import ArgumentDescriptor
 import sys
 import pathlib
 import shutil
@@ -24,6 +25,7 @@ from plumbum.commands import ProcessExecutionError
 
 from plumbum.cmd import whoami, python3, cat, getent, whoami, cargo
 
+
 def exception_handler(exception_type, exception, traceback):
     print("%s: %s" % (exception_type.__name__, exception))
 
@@ -33,19 +35,29 @@ def exception_handler(exception_type, exception, traceback):
 #
 SCRIPT_PATH = pathlib.Path(os.path.dirname(os.path.realpath(__file__)))
 CARGO_DEFAULT_ARGS = ["--color", "always"]
-CARGO_NOSTD_BUILD_ARGS = ["-Z", "build-std=core,alloc", "-Z", "build-std-features=compiler-builtins-mem"]
+CARGO_NOSTD_BUILD_ARGS = ["-Z", "build-std=core,alloc",
+                          "-Z", "build-std-features=compiler-builtins-mem"]
 ARCH = "x86_64"
 
-NETWORK_CONFIG = {
-    'tap0': {
-        'ip_zone': '172.31.0.20/24',
-        'mac': '56:b4:44:e9:62:dc',
-    },
-    'tap2': {
-        'ip_zone': '172.31.0.2/24',
-        'mac': '56:b4:44:e9:62:dd',
-    },
-}
+
+def get_network_config(workers):
+    """
+    Returns a list of network configurations for the workers.
+    """
+    config = {}
+    for i in range(workers):
+        config['tap{}'.format(2*i)] = {
+            'mid': i,
+            'mac': '56:b4:44:e9:62:d{:x}'.format(i),
+        }
+    return config
+
+
+MAX_WORKERS = 16
+NETWORK_CONFIG = get_network_config(MAX_WORKERS)
+NETWORK_INFRA_IP = '172.31.0.20/24'
+
+DCM_SCHEDULER_VERSION = "1.1.4"
 
 #
 # Important globals
@@ -68,8 +80,7 @@ parser = argparse.ArgumentParser()
 # General build arguments
 parser.add_argument("-v", "--verbose", action="store_true",
                     help="increase output verbosity")
-parser.add_argument("-n", "--norun", action="store_true",
-                    help="Only build, don't run")
+
 parser.add_argument("-r", "--release", action="store_true",
                     help="Do a release build.")
 parser.add_argument("--kfeatures", type=str, nargs='+', default=[],
@@ -84,6 +95,17 @@ parser.add_argument("--cmd", type=str,
                     help="Command line arguments passed to the kernel.")
 parser.add_argument("--machine",
                     help='Which machine to run on (defaults to qemu)', required=False, default='qemu')
+
+parser_tasks_mut = parser.add_mutually_exclusive_group(required=False)
+parser_tasks_mut.add_argument("-n", "--norun", action="store_true", default=False,
+                    help="Only build, don't run")
+parser_tasks_mut.add_argument("-b", "--nobuild", action="store_true", default=False,
+                    help="Only run, don't build")
+
+
+# DCM Scheduler arguments
+parser.add_argument("--dcm-path",
+                    help='Path of DCM jar to use (defaults to latest release)', required=False, default=None)
 
 # QEMU related arguments
 parser.add_argument("--qemu-nodes", type=int,
@@ -110,7 +132,7 @@ parser.add_argument("-d", "--qemu-debug-cpu", action="store_true",
                     help="Debug CPU reset (for qemu)")
 parser.add_argument('--nic', default='e1000', choices=["e1000", "virtio-net-pci", "vmxnet3"],
                     help='What NIC model to use for emulation', required=False)
-parser.add_argument('--tap', default='tap0', choices=["tap0", "tap2"],
+parser.add_argument('--tap', default='tap0', choices=[f"tap{2*i}" for i in range(MAX_WORKERS)],
                     help='Which tap interface to use from the host', required=False)
 parser.add_argument('--kgdb', action="store_true",
                     help="Use the GDB remote debugger to connect to the kernel")
@@ -145,11 +167,14 @@ subparser = parser.add_subparsers(help='Advanced network configuration')
 
 # Network setup parser
 parser_net = subparser.add_parser('net', help='Network setup')
+parser_net.add_argument('--workers', type=int, required=False, default=0,
+                        help='Setup `n` workers connected to one controller.')
+
 parser_net_mut = parser_net.add_mutually_exclusive_group(required=False)
-parser_net_mut.add_argument('--host-vm', action="store_true", default=True,
-                            help='Setup one VM for integration testing, connect it to host.')
-parser_net_mut.add_argument('--workers', type=int, required=False, default=0,
-                            help='Setup `n` workers connected to one controller.')
+parser_net_mut.add_argument("--network-only", action="store_true", default=False,
+                            help="Setup network only.")
+parser_net_mut.add_argument("--no-network-setup", action="store_true", default=False,
+                            help="Setup network.")
 
 NRK_EXIT_CODES = {
     0: "[SUCCESS]",
@@ -267,9 +292,11 @@ def deploy(args):
     """
     log("Deploy binaries")
 
-    is_client = False
-    if args.cmd:
-        is_client = args.cmd.find("client") != -1
+    is_client = args.cmd and args.cmd.find("client") != -1
+    is_controller = args.cmd and args.cmd.find("controller") != -1
+
+    if is_controller or is_client:
+        assert args.workers - 1 > 0, "Need at least one worker"
 
     # Clean up / create ESP dir structure
     debug_release = 'release' if args.release else 'debug'
@@ -291,8 +318,14 @@ def deploy(args):
 
         # Deploy kernel
         shutil.copy2(uefi_build_path / 'bootloader.efi',
-                    esp_boot_path / 'BootX64.efi')
+                     esp_boot_path / 'BootX64.efi')
 
+    # Append globally unique machine id to cmd (for rackscale)
+    # as well as a number of workers (clients)
+    if args.cmd and NETWORK_CONFIG[args.tap]['mid'] != None:
+        args.cmd += " mid={}".format(NETWORK_CONFIG[args.tap]['mid'])
+        if is_controller or is_client:
+            args.cmd += " workers={}".format(args.workers)
     # Write kernel cmd-line file in ESP dir
     with open(esp_path / 'cmdline.in', 'w') as cmdfile:
         if args.cmd:
@@ -472,7 +505,7 @@ def run_qemu(args):
         # ip link add bridge1 type bridge ; ifconfig bridge1 up
         # TODO: mac address depend or exokernel or no?
         qemu_default_args += ['-netdev', 'bridge,id=bridge1',
-                              '-device', 'vmxnet3,netdev=bridge1,mac=56:b4:44:e9:62:dc,addr=10.0,multifunction=on']
+                              '-device', 'vmxnet3,netdev=bridge1,mac=56:b4:44:e9:62:d0,addr=10.0,multifunction=on']
         qemu_default_args += ['-chardev', 'socket,path=/var/run/rdmacm-mux-mlx5_0-0,id=mads',
                               '-device', 'pvrdma,ibdev=mlx5_0,ibport=0,netdev=enp216s0f0,mad-chardev=mads,addr=10.1']
     if args.qemu_debug_cpu:
@@ -695,8 +728,6 @@ def configure_network(args):
     # TODO: Could probably avoid 'sudo' here by doing
     # sudo setcap cap_net_admin .../run.py
     # in the setup.sh script
-    # sudo[tunctl[['-t', args.tap, '-u', user, '-g', group]]]()
-    # sudo[ifconfig[args.tap, NETWORK_CONFIG[args.tap]['ip_zone']]]()
 
     # Remove any existing interfaces
     sudo[ip[['link', 'set', 'br0', 'down']]](retcode=(0, 1))
@@ -706,18 +737,47 @@ def configure_network(args):
         sudo[ip[['link', 'del', '{}'.format(tap)]]](retcode=(0, 1))
 
     # Need to find out how to set default=True in case workers are >0 in `args`
-    if (not 'host_vm' in args) or (('host_vm' in args and args.host_vm) and ('workers' in args and args.workers == 0)):
+    if (not 'workers' in args) or ('workers' in args and args.workers <= 1):
         sudo[tunctl[['-t', args.tap, '-u', user, '-g', group]]]()
-        sudo[ifconfig[args.tap, NETWORK_CONFIG[args.tap]['ip_zone']]]()
+        sudo[ifconfig[args.tap, NETWORK_INFRA_IP]]()
         sudo[ip[['link', 'set', args.tap, 'up']]](retcode=(0, 1))
     else:
+        assert args.workers <= MAX_WORKERS, "Too many workers, can't configure network"
         sudo[ip[['link', 'add', 'br0', 'type', 'bridge']]]()
+        sudo[ip[['addr', 'add', NETWORK_INFRA_IP, 'brd', '+', 'dev', 'br0']]]()
         for _, ncfg in zip(range(0, args.workers), NETWORK_CONFIG):
             sudo[tunctl[['-t', ncfg, '-u', user, '-g', group]]]()
-            sudo[ifconfig[ncfg, NETWORK_CONFIG[ncfg]['ip_zone']]]()
             sudo[ip[['link', 'set', ncfg, 'up']]](retcode=(0, 1))
             sudo[brctl[['addif', 'br0', ncfg]]]()
         sudo[ip[['link', 'set', 'br0', 'up']]](retcode=(0, 1))
+
+
+def configure_dcm_scheduler(args):
+    """
+    Set up the DCM jar, fetch if configured version isn't present
+    """
+    jar_dir = "../target"
+    jar_name = "dcm-scheduler.jar"
+    symlink_jar_path = os.path.join(jar_dir, jar_name)
+
+    # Use set jar path (allows for local development) if given in argument
+    dcm_path = args.dcm_path
+
+    # If not given in argument, use specific version of DCM jar
+    if args.dcm_path == None:
+        dcm_jar = "scheduler-{}-jar-with-dependencies.jar".format(
+            DCM_SCHEDULER_VERSION)
+        dcm_path = os.path.join(jar_dir, dcm_jar)
+
+        # Download jar if necessary
+        if not os.path.exists(dcm_path):
+            subprocess.run("wget https://github.com/hunhoffe/nrk-dcm-scheduler/releases/download/release-{}/{} -P {}".format(
+                DCM_SCHEDULER_VERSION, dcm_jar, jar_dir), shell=True, check=True, timeout=10)
+
+    # Create consistent symlink location for the DCM scheduler jar
+    if os.path.exists(symlink_jar_path) or os.path.islink(symlink_jar_path):
+        os.unlink(symlink_jar_path)
+    os.symlink(dcm_path, symlink_jar_path)
 
 
 #
@@ -726,6 +786,13 @@ def configure_network(args):
 if __name__ == '__main__':
     "Execution pipeline for building and launching nrk"
     args = parser.parse_args()
+
+    # Setup network
+    if not ('no_network_setup' in args and args.no_network_setup):
+        configure_network(args)
+
+    if 'network_only' in args and args.network_only:
+        sys.exit(0)
 
     user = whoami().strip()
     kvm_members = getent['group', 'kvm']().strip().split(":")[-1].split(',')
@@ -753,12 +820,8 @@ if __name__ == '__main__':
         else:
             raise e
 
-    # Setup network
-    is_client = False
-    if args.cmd:
-        is_client = args.cmd.find("client") != -1
-    if not is_client:
-        configure_network(args)
+    # Setup DCM scheduler jar
+    configure_dcm_scheduler(args)
 
     if args.release:
         CARGO_DEFAULT_ARGS.append("--release")
@@ -768,11 +831,12 @@ if __name__ == '__main__':
         # Minimize python exception backtraces
         sys.excepthook = exception_handler
 
-    # Build
-    build_bootloader(args)
-    build_kernel(args)
-    build_user_libraries(args)
-    build_userspace(args)
+    if not args.nobuild:
+        # Build
+        build_bootloader(args)
+        build_kernel(args)
+        build_user_libraries(args)
+        build_userspace(args)
 
     # Deploy
     deploy(args)

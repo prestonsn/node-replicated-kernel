@@ -27,11 +27,15 @@ To run the unit tests of the kernel:
 To run the integration tests of the kernel:
 
 1. `cd kernel`
-1. `RUST_TEST_THREADS=1 cargo test --test integration-test`
+1. `RUST_TEST_THREADS=1 cargo test --test '*'`
 
 If you would like to run a specific integration test you can pass it with `--`:
 
-1. `RUST_TEST_THREADS=1 cargo test --test integration-test -- userspace_smoke`
+1. `RUST_TEST_THREADS=1 cargo test --test '*' -- userspace_smoke`
+
+If you would like to run a specific set of integration tests, you can specify the file name with `--test`:
+
+1. `RUST_TEST_THREADS=1 cargo test --test s00_core_test`
 
 In case an integration test fails, adding `--nocapture` at the end (needs to
 come after the `--`) will make sure that the underlying `run.py` invocations are
@@ -72,7 +76,7 @@ flags will also choose a different main() function than the one you're seeing
 There is two parts to the integration test.
 
 - The host side (that will go off and spawn a qemu instance) for running the
-  integration tests. It is found in `kernel/tests/integration-test.rs`.
+  integration tests. It is found in `kernel/tests`.
 - The corresponding main functions in the kernel that gets executed for a
   particular example are located at `kernel/src/integration_main.rs`
 
@@ -84,8 +88,22 @@ To add a new integration test the following tests may be necessary:
    `kernel/src/integration_main.rs` with the used feature name as an annotation.
    It may also be possible to re-use an existing xmain function, in that case
    make not of the feature name used to include it.
-1. Add a runner function to `kernel/tests/integration-test.rs` that builds the
+1. Add a runner function to one of the files in `kernel/tests` that builds the
    kernel with the cargo feature runs it and checks the output.
+
+Integration tests are divided into categories and named accordingly (partially
+to ensure the tests run in a sensible order):
+* ```s00_*```: Core kernel functionality like boot-up and fault handling
+* ```s01_*```: Low level kernel services: SSE, memory allocation etc.
+* ```s02_*```: High level kernel services: ACPI, core booting mechanism, NR, VSpace etc.
+* ```s03_*```: High level kernel functionality: Spawn cores, run user-space programs
+* ```s04_*```: User-space runtimes
+* ```s05_*```: User-space applications
+* ```s06_*```: Rackscale (distributed) tests
+
+Benchmarks are named as such: 
+* ```s10_*```: User-space applications benchmarks
+* ```s11_*```: Rackscale (distributed) benchmarks
 
 ## Network
 
@@ -93,6 +111,21 @@ nrk has support for three network interfaces at the moment: virtio, e1000 and
 vmxnet3. virtio and e1000 are available by using the respective rumpkernel
 drivers (and it's network stack). vmxnet3 is a standalone implementation that
 uses `smoltcp` for the network stack and is also capable of running in ring 0.
+
+### Network Setup
+
+The integration tests that run multiple instances of nrk require
+bridged tap interfaces. For those integration tests, the test framework calls
+run.py with the `--network-only` flag which will destroy existing conflicting
+tap interfaces and create new tap interface(s) for the test based on the
+number of hosts in the test. Then, to run the nrk instances, run.py is invoked
+with the `--no-network-setup` flag.
+
+To setup the network for a single client and server (`--workers clients+server`), run the following command:
+
+```bash
+python3 run.py --kfeatures integration-test --cmd "test=network_only" net --workers 2 --network-only
+```
 
 ### Ping
 
@@ -127,7 +160,7 @@ A fully automated CI test that checks the network using ping is available as
 well, it can be invoked with the following command:
 
 ```bash
-RUST_TEST_THREADS=1 cargo test --test integration-test -- s04_userspace_rumprt_net
+RUST_TEST_THREADS=1 cargo test --test '*' -- s04_userspace_rumprt_net
 ```
 
 ### socat and netcat

@@ -3,70 +3,48 @@
 
 #![allow(warnings)]
 
-use alloc::boxed::Box;
-use rpc::api::{RPCClient, RPCHandler, RegistrationHandler};
-use spin::{Lazy, Mutex};
+use rpc::api::{RPCHandler, RegistrationHandler};
 
-mod error;
-mod fio;
-
-mod close;
+pub(crate) mod client;
 pub(crate) mod controller;
-mod delete;
-mod getinfo;
-mod mkdir;
-mod open;
-mod rename;
-mod rw;
+pub(crate) mod dcm;
+pub(crate) mod error;
+pub(crate) mod fileops;
+pub(crate) mod kernelrpc;
+pub(crate) mod processops;
+pub(crate) mod registration;
 pub(crate) mod syscalls;
+pub(crate) mod systemops;
 
-use crate::cmdline::Transport;
+pub(crate) use self::kernelrpc::KernelRpc;
 
-/// A handle to an RPC client
-///
-/// This is used to send requests to a remote control-plane.
-#[thread_local]
-pub(crate) static RPC_CLIENT: Lazy<Mutex<Box<dyn RPCClient>>> = Lazy::new(|| {
-    // Create network stack and instantiate RPC Client
-    return if crate::CMDLINE
-        .get()
-        .map_or(false, |c| c.transport == Transport::Ethernet)
-    {
-        Mutex::new(
-            crate::transport::ethernet::init_ethernet_rpc(
-                smoltcp::wire::IpAddress::v4(172, 31, 0, 11),
-                6970,
-            )
-            .expect("Failed to initialize ethernet RPC"),
-        )
-    } else {
-        // Default is Shmem, even if transport unspecified
-        Mutex::new(
-            crate::transport::shmem::init_shmem_rpc().expect("Failed to initialize shmem RPC"),
-        )
-    };
-});
-
-pub(crate) use fio::FileIO;
+use crate::arch::rackscale::registration::register_client;
 
 // Re-export client registration
-use self::fio::register_client;
 pub(crate) const CLIENT_REGISTRAR: RegistrationHandler = register_client;
 
-// Re-export handlers
-use self::close::handle_close;
-pub(crate) const CLOSE_HANDLER: RPCHandler = handle_close;
-use self::delete::handle_delete;
-pub(crate) const DELETE_HANDLER: RPCHandler = handle_delete;
-use self::getinfo::handle_getinfo;
-pub(crate) const GETINFO_HANDLER: RPCHandler = handle_getinfo;
-use self::mkdir::handle_mkdir;
-pub(crate) const MKDIR_HANDLER: RPCHandler = handle_mkdir;
-use self::open::handle_open;
-pub(crate) const OPEN_HANDLER: RPCHandler = handle_open;
-use self::rename::handle_rename;
-pub(crate) const RENAME_HANDLER: RPCHandler = handle_rename;
-use self::rw::handle_read;
-pub(crate) const READ_HANDLER: RPCHandler = handle_read;
-use self::rw::handle_write;
-pub(crate) const WRITE_HANDLER: RPCHandler = handle_write;
+// Re-export handlers: file operations
+pub(crate) const CLOSE_HANDLER: RPCHandler = fileops::close::handle_close;
+pub(crate) const DELETE_HANDLER: RPCHandler = fileops::delete::handle_delete;
+pub(crate) const GETINFO_HANDLER: RPCHandler = fileops::getinfo::handle_getinfo;
+pub(crate) const MKDIR_HANDLER: RPCHandler = fileops::mkdir::handle_mkdir;
+pub(crate) const OPEN_HANDLER: RPCHandler = fileops::open::handle_open;
+pub(crate) const RENAME_HANDLER: RPCHandler = fileops::rename::handle_rename;
+pub(crate) const READ_HANDLER: RPCHandler = fileops::rw::handle_read;
+pub(crate) const WRITE_HANDLER: RPCHandler = fileops::rw::handle_write;
+
+// Re-export handdlers: process operations
+pub(crate) const REQUEST_CORE_HANDLER: RPCHandler = processops::request_core::handle_request_core;
+pub(crate) const ALLOCATE_PHYSICAL_HANDLER: RPCHandler =
+    processops::allocate_physical::handle_allocate_physical;
+pub(crate) const RELEASE_PHYSICAL_HANDLER: RPCHandler =
+    processops::release_physical::handle_release_physical;
+pub(crate) const LOG_HANDLER: RPCHandler = processops::print::handle_log;
+
+// Re-export handlers: system operations
+pub(crate) const GET_HARDWARE_THREADS_HANDLER: RPCHandler =
+    systemops::get_hardware_threads::handle_get_hardware_threads;
+
+// Client polls for work
+pub(crate) const REQUEST_CORE_WORK_HANDLER: RPCHandler =
+    processops::request_core::handle_request_core_work;

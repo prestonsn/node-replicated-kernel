@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 // Various integration tests that run inside a VM and test different aspects
-// of the kernel. Check `kernel/tests/integration-test.rs` for the host-side
+// of the kernel. Check `kernel/tests/*.rs` for the host-side
 // counterpart.
 
 use crate::arch::debug::shutdown;
@@ -130,7 +130,7 @@ fn timer() {
         }
 
         // Don't change this line without changing
-        // `s01_timer` in integration-tests.rs:
+        // `s01_timer` in s01_kernel_low_tests.rs:
         info!("Setting the timer");
 
         let start = rawtime::Instant::now();
@@ -574,7 +574,7 @@ fn vspace_debug() {
 
 // Careful note: If you change any of the lines order/amount/variable names etc.
 // in this function, you *most likely* have to adjust s02_gdb in
-// `integration-test.rs`.
+// `s02_kernel_low_tests.rs`.
 #[cfg(feature = "integration-test")]
 fn gdb() {
     use log::info;
@@ -665,7 +665,7 @@ fn vmxnet_smoltcp() {
                     PAddr::from(KERNEL_BASE),
                     PAddr::from(bar),
                     0x1000,
-                    MapAction::ReadWriteKernel,
+                    MapAction::kernel() | MapAction::write(),
                 )
                 .is_ok());
         }
@@ -701,7 +701,7 @@ fn vmxnet_smoltcp() {
     let tcp_tx_buffer = TcpSocketBuffer::new(vec![0; 4096]);
     let tcp_socket = TcpSocket::new(tcp_rx_buffer, tcp_tx_buffer);
 
-    let ethernet_addr = EthernetAddress([0x56, 0xb4, 0x44, 0xe9, 0x62, 0xdc]);
+    let ethernet_addr = EthernetAddress([0x56, 0xb4, 0x44, 0xe9, 0x62, 0xd0]);
     let ip_addrs = [IpCidr::new(IpAddress::v4(172, 31, 0, 10), 24)];
 
     // Create SocketSet w/ space for 1 socket
@@ -719,7 +719,7 @@ fn vmxnet_smoltcp() {
     let mut tcp_6970_active = false;
     let mut done = false;
     let clock = Clock::new();
-    // Don't change the next line without changing `integration-test.rs`
+    // Don't change the next line without changing `s03_kernel_high_tests.rs`
     info!("About to serve sockets!");
 
     while !done && clock.elapsed() < Instant::from_millis(25_000) {

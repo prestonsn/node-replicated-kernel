@@ -10,7 +10,7 @@ directly:
 
 * `s05_redis_smoke` will spawn nrk with a redis instance, connect to it using
   `nc` and issue a few commands to test basic functionality.
-* `s06_redis_benchmark_virtio` and `s06_redis_benchmark_e1000` will spawn nrk
+* `s10_redis_benchmark_virtio` and `s10_redis_benchmark_e1000` will spawn nrk
   with a redis instance and launch the `redis-benchmark` CLI tool on the host
   for benchmarking. The results obtained by redis-benchmark are parsed and
   written into `redis_benchmark.csv`. The `virtio` and `e1000` suffix indicate
@@ -19,12 +19,12 @@ directly:
 ```bash
 cd kernel
 # Runs both _virtio and _e1000 redis benchmark tests
-RUST_TEST_THREADS=1 cargo test --test integration-test -- s06_redis_benchmark
+RUST_TEST_THREADS=1 cargo test --test s10* -- s10_redis_benchmark
 ```
 
 ## Launch redis manually
 
-You can also do the steps that the integration-test does manually. We start a
+You can also do the steps that the integration test does manually. We start a
 DHCP server first. The `apparmor teardown` is necessary if you don't have a
 security policy that allows the use of a `dhcpd.conf` at this location.
 

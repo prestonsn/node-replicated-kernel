@@ -3,14 +3,14 @@
 
 use core::result::Result;
 
-use crate::rpc::{NodeId, RPCError, RPCHeader, RPCType};
+use crate::rpc::{ClientId, RPCError, RPCHeader, RPCType};
 
 /// RPC Handler function
 pub type RPCHandler = fn(hdr: &mut RPCHeader, payload: &mut [u8]) -> Result<(), RPCError>;
 
 /// RPC Client registration function
 pub type RegistrationHandler =
-    fn(hdr: &mut RPCHeader, payload: &mut [u8]) -> Result<NodeId, RPCError>;
+    fn(hdr: &mut RPCHeader, payload: &mut [u8]) -> Result<ClientId, RPCError>;
 
 /// RPC server operations
 pub trait RPCServer<'a> {
@@ -19,10 +19,16 @@ pub trait RPCServer<'a> {
     where
         'c: 'a;
 
-    ///  Accept an RPC client
-    fn add_client<'c>(&mut self, func: &'c RegistrationHandler) -> Result<NodeId, RPCError>
+    /// Accept an RPC client
+    fn add_client<'c>(&mut self, func: &'c RegistrationHandler) -> Result<(), RPCError>
     where
         'c: 'a;
+
+    /// Handle 1 RPC per client
+    fn handle(&self) -> Result<(), RPCError>;
+
+    /// Try to handle 1 RPC per client, if data is available (non-blocking if RPCs not available)
+    fn try_handle(&self) -> Result<bool, RPCError>;
 
     /// Run the RPC server
     fn run_server(&self) -> Result<(), RPCError>;
@@ -31,7 +37,7 @@ pub trait RPCServer<'a> {
 /// RPC client operations
 pub trait RPCClient {
     /// Registers with a RPC server
-    fn connect(&mut self) -> Result<NodeId, RPCError>;
+    fn connect(&mut self, data_in: &[&[u8]]) -> Result<(), RPCError>;
 
     /// Calls a remote RPC function with ID
     fn call(

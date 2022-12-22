@@ -4,6 +4,7 @@
 //! System call stubs
 
 use crate::error::KResult;
+use crate::process::UserSlice;
 use crate::syscalls::{ProcessDispatch, SystemCallDispatch, SystemDispatch, VSpaceDispatch};
 
 pub(crate) struct UnixSystemCalls;
@@ -26,7 +27,7 @@ impl SystemDispatch<u64> for UnixSystemCalls {
 }
 
 impl ProcessDispatch<u64> for UnixSystemCalls {
-    fn log(&self, _buffer_arg: u64, _len: u64) -> KResult<(u64, u64)> {
+    fn log(&self, _buffer_arg: UserSlice) -> KResult<(u64, u64)> {
         todo!()
     }
 
@@ -47,6 +48,10 @@ impl ProcessDispatch<u64> for UnixSystemCalls {
     }
 
     fn allocate_physical(&self, _page_size: u64, _affinity: u64) -> KResult<(u64, u64)> {
+        todo!()
+    }
+
+    fn release_physical(&self, _frame_id: u64) -> KResult<(u64, u64)> {
         todo!()
     }
 
