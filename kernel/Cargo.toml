@@ -24,7 +24,7 @@ nvme = { path = "../lib/nvme" }
 bootloader_shared = { path = "../lib/bootloader_shared" }
 x86 = { version = "0.52", features = ["unstable"] }
 klogger = "0.0.16"
-driverkit = "0.21"
+driverkit = "0.24"
 spin = "0.9.1"
 elfloader = "0.14"
 slabmalloc = "0.10"
@@ -124,3 +124,5 @@ cause-gpfault-early = []
 cause-double-fault = []
 # test-timer: print something on a timer interrupt.
 test-timer = []
+# test-shmem: print something on a shmem interrupt.
+test-shmem = []
