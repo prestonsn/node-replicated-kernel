@@ -31,7 +31,7 @@ fn new_ctxt(
             .find_section_by_name(S::section_name())
             .map(|s| s.raw_data(&elf.file))
             .unwrap_or(&[]);
-        S::from(gimli::EndianRcSlice::new(Rc::from(&*data), endian))
+        S::from(gimli::EndianRcSlice::new(Rc::from(data), endian))
     }
 
     let debug_abbrev: gimli::DebugAbbrev<_> = load_section(file, endian);
@@ -279,7 +279,7 @@ pub(crate) fn rust_eh_personality(
 
 #[cfg(target_os = "none")]
 #[no_mangle]
-#[cfg_attr(target_os = "none", lang = "oom")]
+#[alloc_error_handler]
 pub(crate) fn oom(layout: Layout) -> ! {
     sprintln!(
         "OOM: Unable to satisfy allocation request for size {} with alignment {}.",

@@ -997,7 +997,6 @@ impl elfloader::ElfLoader for Ring3Process {
                     self.offset + page_base + i * LARGE_PAGE_SIZE,
                     frame
                 );
-
                 self.vspace
                     .map_frame(
                         self.offset + page_base + i * LARGE_PAGE_SIZE,
@@ -1369,10 +1368,9 @@ impl FrameManagement for Ring3Process {
 #[cfg(target_os = "none")]
 pub(crate) fn spawn(binary: &'static str) -> Result<Pid, KError> {
     use crate::nr;
-    use crate::process::{allocate_dispatchers, make_process};
+    use crate::process::make_process;
 
     let pid = make_process::<Ring3Process>(binary)?;
-    allocate_dispatchers::<Ring3Process>(pid)?;
 
     // Set current thread to run executor from our process (on the current core)
     let _gtid = nr::KernelNode::allocate_core_to_process(
